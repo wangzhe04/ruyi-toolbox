@@ -183,3 +183,17 @@ shim 要做的：
 - Windows 上 AMD 走哪条路（官方 Windows 版 ROCm／PyTorch，还是 torch-directml）**必须先查官方当前文档**，结论与来源写进
   `asr-shim/docs/backend-notes.md` 的「AMD／非英伟达加速」一节。`install.ps1 -Gpu auto|nvidia|amd|cpu`。
 - 验证状态如实标注：开发机只有英伟达卡，**AMD 路径未经真机验证**；选择与降级逻辑用假后端单测覆盖。
+
+## 8. 与如意的真联调记录（2026-09-21，主会话独立验证）
+
+隔离的如意实例（源码树、临时数据目录、端口 8791、`RUYI_TOOLBOX_HOME` 指向真实登记目录），不碰用户正在跑的那一个：
+
+- 启动后自己发现登记 → 按 `run` 拉起 shim → 健康 → 状态 `running`、`owned:true`、端口 8790。
+- 自动生成服务商 `toolbox-asr-shim`（`http://127.0.0.1:8790/v1`、模型带语音识别标记）；该实例没配过语音识别，被自动选中，`seen` 记下 `asr-shim`。
+- 经如意的 `/api/audio/transcribe` 转中文样例：**逐字正确**。首发 7.0 s（含加载模型），热态 0.62–0.64 s。`/health` 如实显示
+  `cuda (NVIDIA GeForce RTX 5080 Laptop GPU, bfloat16)`；探活不触发加载（首发前 `loaded:false`）。
+- 杀掉 shim 整棵进程树 → 下一次转写由如意就地重新拉起并成功（6.6 s，含重新加载）。
+- 只强杀如意本体（不杀树，模拟崩溃）→ shim 约 0.5 s 内自行退出，显存 3170 → 1365 MiB 归还，8790 端口无残留。
+- shim 单测 125 条在主会话这边独立复跑全过。
+
+未验证：AMD 路径（无硬件）；真人声音下的表现（样例是合成语音）。
