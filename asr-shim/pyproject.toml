@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruyi-asr-shim"
+version = "0.1.0"
+description = "把 Qwen3-ASR 包成 OpenAI 兼容 /v1/audio/transcriptions 的本机 shim（给如意工作台用）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Ruyi Workbench" }]
+
+# torch 【故意不写在这里】：这块 RTX 5080 是 Blackwell(sm_120)，必须装 cu128 及以上的构建，
+# 而 PyPI 上的默认 torch 轮子不一定是。由 scripts/install.ps1 从 PyTorch 官方 cu128 索引装。
+dependencies = [
+  "numpy>=1.24",
+  "transformers>=5.13.0",  # Qwen3-ASR 原生支持从 5.13.0 起（见 docs/backend-notes.md）
+  "accelerate>=0.30",
+  "soundfile>=0.12",       # 解 flac/ogg/（多数情况下）mp3；wav 走标准库不需要它
+]
+
+[project.optional-dependencies]
+# 更好的重采样（用户丢进来的非 16 kHz 文件才用得上）。装不上也不影响，会退到线性插值。
+resample = ["soxr>=0.3"]
+# 从 ModelScope 下模型（大陆推荐）
+download = ["modelscope>=1.20"]
+
+[project.scripts]
+ruyi-asr-shim = "ruyi_asr_shim.__main__:main"
+
+[tool.setuptools]
+packages = ["ruyi_asr_shim"]
