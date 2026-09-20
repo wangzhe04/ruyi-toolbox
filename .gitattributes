@@ -1,0 +1,13 @@
+# 与主仓 ruyi-workbench-oss 同口径：文本一律 LF，Windows 启动器是显式的 CRLF 例外。
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+# PowerShell 5.1 读无 BOM 的 UTF-8 会把中文读坏；本仓的 .ps1 一律 UTF-8 with BOM + CRLF。
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.wav binary
+*.mp3 binary
+*.png binary

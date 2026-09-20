@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境（各组件各自建在自己目录下）
+.venv/
+venv/
+
+# 模型权重与缓存 —— 绝不进 git
+models/
+*.safetensors
+*.gguf
+*.bin
+
+# 样例音频 —— 绝不进 git（用 scripts/make-sample.ps1 现生成）
+samples/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.webm
+
+# 本地临时产物
+.tmp/
+*.log
