@@ -41,10 +41,24 @@ $root = Split-Path -Parent $here
 $venv = Join-Path $root ".venv"
 $py = Join-Path $venv "Scripts\python.exe"
 
+# 进度：本脚本共几步、现在第几步。每一步的标题前带上 [第几步/共几步]，并用 Write-Progress 画进度条
+# （被 setup.ps1 调用时，这条进度条挂在它的「安装扩展组件」总进度条下面）。总步数在下面确定了要不要建 venv 等之后再算准。
+$script:StepIndex = 0
+$script:StepTotal = 1
+
+function Write-StepHeader {
+    param([string]$Title)
+    $script:StepIndex++
+    Write-Host ""
+    Write-Host ("==> [" + $script:StepIndex + "/" + $script:StepTotal + "] " + $Title) -ForegroundColor Cyan
+    Write-Progress -Id 2 -ParentId 1 -Activity "安装 asr-shim" `
+        -Status ("[" + $script:StepIndex + "/" + $script:StepTotal + "] " + $Title) `
+        -PercentComplete ([int](100 * ($script:StepIndex - 1) / [Math]::Max($script:StepTotal, 1)))
+}
+
 function Invoke-Step {
     param([string]$Title, [scriptblock]$Body)
-    Write-Host ""
-    Write-Host ("==> " + $Title) -ForegroundColor Cyan
+    Write-StepHeader $Title
     & $Body
     if ($LASTEXITCODE -ne 0) {
         throw ("这一步失败了（退出码 " + $LASTEXITCODE + "）：" + $Title)
@@ -96,6 +110,9 @@ if ($Recreate -and (Test-Path $venv)) {
     Remove-Item -Recurse -Force $venv
 }
 
+# 总步数：建 venv（已有就不算）＋ 装 PyTorch（AMD 是 SDK＋torch 两步，其余一步）＋ 装本体与依赖 ＋ 装 modelscope ＋ 自检。
+$script:StepTotal = $(if (Test-Path $py) { 0 } else { 1 }) + $(if ($Gpu -eq "amd") { 2 } else { 1 }) + 3
+
 if (-not (Test-Path $py)) {
     Invoke-Step ("建虚拟环境（Python " + $PythonVersion + "）") {
         & uv venv --python $PythonVersion $venv
@@ -125,17 +142,32 @@ elseif ($Gpu -eq "amd") {
     Write-Host "官方页面（装不上时以它为准）：" -ForegroundColor Yellow
     Write-Host "  https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"
 
-    $base = "https://repo.radeon.com/rocm/windows/rocm-rel-" + $RocmRelease + "/"
+    # 这几个是直链而不是 index，uv 的 --offline／--find-links 管不到它们。用 tools\package-bundle.ps1 打了
+    # 「依赖库」的 AMD 包会把它们放在 .offline-wheels\rocm\ 里——有就直接装本地文件，不联网。
+    $rocmLocal = Join-Path $root ".offline-wheels\rocm"
+    if (Test-Path -LiteralPath $rocmLocal) {
+        Write-Host ("用 " + $rocmLocal + " 里带着的 ROCm 文件，不联网。")
+        $sdkFiles = @(Get-ChildItem -LiteralPath $rocmLocal -File | Where-Object { $_.Name -match '^(rocm_sdk_.*\.whl|rocm-.*\.tar\.gz)$' } | ForEach-Object { $_.FullName })
+        $torchFiles = @(Get-ChildItem -LiteralPath $rocmLocal -File -Filter "torch-*.whl" | ForEach-Object { $_.FullName })
+        if ($sdkFiles.Count -eq 0 -or $torchFiles.Count -eq 0) {
+            Write-Host ("这个目录里的 ROCm 文件不全（SDK " + $sdkFiles.Count + " 个、torch " + $torchFiles.Count + " 个）。") -ForegroundColor Red
+            exit 1
+        }
+    }
+    else {
+        $base = "https://repo.radeon.com/rocm/windows/rocm-rel-" + $RocmRelease + "/"
+        $sdkFiles = @(
+            ($base + "rocm_sdk_core-" + $RocmRelease + "-py3-none-win_amd64.whl"),
+            ($base + "rocm_sdk_devel-" + $RocmRelease + "-py3-none-win_amd64.whl"),
+            ($base + "rocm_sdk_libraries_custom-" + $RocmRelease + "-py3-none-win_amd64.whl"),
+            ($base + "rocm-" + $RocmRelease + ".tar.gz"))
+        $torchFiles = @($base + "torch-2.9.1%2Brocm" + $RocmRelease + "-cp312-cp312-win_amd64.whl")
+    }
     Invoke-Step ("装 ROCm SDK " + $RocmRelease) {
-        & uv pip install --python $py --no-cache `
-            ($base + "rocm_sdk_core-" + $RocmRelease + "-py3-none-win_amd64.whl") `
-            ($base + "rocm_sdk_devel-" + $RocmRelease + "-py3-none-win_amd64.whl") `
-            ($base + "rocm_sdk_libraries_custom-" + $RocmRelease + "-py3-none-win_amd64.whl") `
-            ($base + "rocm-" + $RocmRelease + ".tar.gz")
+        & uv pip install --python $py --no-cache @sdkFiles
     }
     Invoke-Step ("装 PyTorch（ROCm " + $RocmRelease + " 构建）") {
-        & uv pip install --python $py --no-cache `
-            ($base + "torch-2.9.1%2Brocm" + $RocmRelease + "-cp312-cp312-win_amd64.whl")
+        & uv pip install --python $py --no-cache @torchFiles
     }
 }
 else {
@@ -150,18 +182,17 @@ Invoke-Step "装 asr-shim 自己与其余依赖（transformers / accelerate / so
 }
 
 # 下模型要用；放在这里省得用户再折腾一次。装不上也不致命（还能走 HuggingFace 那条路）。
-Write-Host ""
-Write-Host "==> 装 modelscope（从魔搭下模型用，大陆推荐）" -ForegroundColor Cyan
+Write-StepHeader "装 modelscope（从魔搭下模型用，大陆推荐）"
 & uv pip install --python $py "modelscope>=1.20"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "modelscope 没装上。不致命 —— 下模型时可以用 -Source hf 走 HuggingFace。" -ForegroundColor Yellow
 }
 
-Write-Host ""
-Write-Host "==> 自检" -ForegroundColor Cyan
+Write-StepHeader "自检"
 & $py -m ruyi_asr_shim doctor
 $doctorCode = $LASTEXITCODE
 
+Write-Progress -Id 2 -Activity "安装 asr-shim" -Completed
 Write-Host ""
 if ($doctorCode -eq 0) {
     Write-Host "装好了。" -ForegroundColor Green

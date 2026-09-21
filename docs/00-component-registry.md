@@ -219,24 +219,48 @@ packages = ["ruyi_你的组件名"]
 
 ### 6.6 想要「打包依赖库 → 目标机器装环境不用联网」，`pyproject.toml` 写对就够（多数组件不用改脚本）
 
-打包器（`Get-PyProjectDeps`）用正则从你的 `pyproject.toml` 里抽 `[project] dependencies` 和
-`[build-system] requires` 两个数组，拿去用 `pip download` 拉 wheel——只要这两个数组是「每项一个带引号的
-字符串」这种平常写法（单行或多行都行），不用改 `package-bundle.ps1`，你的组件就能在 GUI／`-OfflineDeps`
-里被勾选「打包依赖库」。
+**机制：本机现成的优先，缺的才下载。** 打包器不会去联网重新解析一遍依赖，而是：
 
-**例外：装依赖时按 GPU 型号自己挑 index 的包**（比如 asr-shim 的 `install.ps1` 按显卡挑 CPU／CUDA／ROCm
-版 PyTorch，这种包通常不会明写在 `dependencies` 里，`install.ps1` 自己用 `uv pip install torch --index-url
-...` 单独装）——这种要在 `$script:ComponentOverrides` 你组件那条里加一个 `GpuTorch` 表，打包器才知道
-「这个组件除了 `pyproject.toml` 里那些，还要另外按 GPU 变体下一份什么」：
+1. 用**你组件自己 `.venv` 的 python** 跑 [`tools/localwheels.py`](../tools/localwheels.py)，把本机已装的包
+   （`importlib.metadata` 的 RECORD）**还原成 wheel 文件**——本机装好、跑通过的那一套，一个都不用再下，
+   轮子的平台标签（`cp312-…-win_amd64`）原样保留。所以组件要先跑过一次 `install.ps1`（有 `.venv`）。
+2. 用 `pyproject.toml` 里的 `[project] dependencies` 与 `[build-system] requires`（`Get-PyProjectDeps` 用正则抽，
+   只要是「每项一个带引号的字符串」的平常写法就行）逐条问：本机满不满足？**不满足的才去下**（典型例子：
+   本机 venv 里没有的 build 依赖 `setuptools`）。GUI 里勾上「打包依赖库」就会显示「本机已有 N 个包…；需要联网
+   下载：…」，命令行模式则打进日志。
+3. 下载用系统 pip，但**按组件 `install.ps1` 里写的 Python 版本挑轮子**（`--python-version 3.12 --platform
+   win_amd64 --only-binary=:all:`），**不是**按运行打包器的那个系统 Python 挑——否则系统是 3.13 时下出来的
+   全是 `cp313` 轮子，3.12 的 venv 离线装不上。
+4. **离线自检**：在一个全新的临时 Python 环境里、用**空的 uv 缓存**、按目标机器 `setup.ps1` 的办法
+   （`UV_OFFLINE=1` + `UV_FIND_LINKS`）先 dry-run 凑依赖、再真装一次项目本体。空缓存是关键——否则在装过一堆
+   东西的机器上，缺的包会被 uv 缓存悄悄补上，自检永远通过。不通过就中止打包并说清楚缺什么。
+
+**例外：装依赖时按显卡自己挑构建的包**（比如 asr-shim 的 `install.ps1` 按显卡挑 CPU／CUDA／ROCm 版 PyTorch，
+这种包不会明写在 `dependencies` 里）——要在 `$script:ComponentOverrides` 你组件那条里加 `GpuOrder`／`GpuTorch`
+两项，打包器才知道有哪几种构建可选：
 
 ```powershell
+GpuOrder = @("nvidia", "amd", "cpu")     # 界面下拉框里的先后顺序（Hashtable 自己不保序）
 GpuTorch = @{
-    cpu    = @{ Label = "GUI 下拉框里显示的说明"; IndexUrl = "https://download.pytorch.org/whl/cpu" }
-    nvidia = @{ Label = "……"; IndexUrl = "https://download.pytorch.org/whl/cu128" }
-    # 只列你的 install.ps1 真正支持、且走的是「PyPI 兼容 index」而不是写死 wheel 直链的那些变体——
-    # 后者（比如 asr-shim 的 ROCm 分支）没法这样离线打包，见 tools/README.md「已知限制」。
+    nvidia = @{ Label = "GUI 下拉框里显示的说明"; IndexUrl = "https://download.pytorch.org/whl/cu128"; Approx = "约 3 GB" }
+    cpu    = @{ Label = "……"; IndexUrl = "https://download.pytorch.org/whl/cpu"; Approx = "约 200 MB" }
+    amd    = @{ Label = "……"; Rocm = $true; Approx = "数 GB" }   # 直链型：没有 index，见下
 }
 ```
 
-没有 `GpuTorch` 表的组件，GUI 上「打包依赖库」只是个开关；有的话（目前只有 asr-shim）会多一个 GPU 变体
-下拉框，`-OfflineDeps` 对应给 `cpu`／`nvidia` 而不是随便一个非空值。
+- **本机 venv 里装的是哪种（看 torch 版本号里的 `+cu128`／`+cpu`／`+rocm`），选它就不用下**；选别的才下——
+  `IndexUrl` 型走 PyTorch 的 index，只下 torch 本体（它的依赖本机已有）。
+- **`Rocm = $true`（直链型）**：AMD 的 ROCm 是几个写死的直链，不是 PyPI 兼容的 index，`uv` 的
+  `--offline`／`--find-links` 管不到。打包器把它们用 `curl` 下到 `.offline-wheels\rocm\`，`install.ps1` 的 AMD
+  分支见到这个目录就直接装本地文件。版本号要和 `install.ps1` 里的一致——放在 `$script:ComponentOverrides`
+  的 `Rocm` 表里，打包时会核对，对不上就报错。
+- 打进 manifest 的 `gpuVariant` 会让 `setup.ps1` 给 `install.ps1` 传 `-Gpu <变体>`：包里带的是哪种 PyTorch 就
+  装哪种，不让 `install.ps1` 按**目标机器**的显卡再猜一遍（带 NVIDIA 版、目标机是 AMD 卡，它会转去联网下
+  ROCm，离线必然失败）。
+
+没有 `GpuTorch` 表的组件，GUI 上「打包依赖库」只是个开关；有的话（目前只有 asr-shim）会多一个显卡类型
+下拉框，每一项标着「本机已装，直接用」或「需下载」；`-OfflineDeps` 对应给 `nvidia`／`amd`／`cpu` 而不是随便
+一个非空值（给了别的值会报错，不再悄悄跳过 PyTorch）。
+
+> **⚠ AMD 这条路未经真机验证**（开发机只有英伟达卡）：下载、目录约定、`install.ps1` 的本地文件分支都按 AMD
+> 官方文档与现有在线分支的写法对了一遍，离线自检也会 dry-run 它，但没有在真的 AMD 卡上装过、跑过。
