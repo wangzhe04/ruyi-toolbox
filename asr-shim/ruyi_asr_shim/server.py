@@ -5,8 +5,9 @@
 
 路由：
   GET  /health                    进程活着即 200；【不触发模型加载】
-  GET  /v1/models                 OpenAI 形的模型列表（如意的「测试连接」会打它）
-  POST /v1/audio/transcriptions   Whisper 形转写（如意 transcribeAudioViaProvider 的缺省协议）
+  GET  /v1/models                 OpenAI 形的模型列表（如意的「测试连接」会打它）；auto 模式下列出 auto ＋ 每份装好的尺寸
+  POST /v1/audio/transcriptions   Whisper 形转写（如意 transcribeAudioViaProvider 的缺省协议）；model 字段选尺寸，换了就换加载
+  POST /v1/unload                 立刻卸载已加载的模型、释放显存（第 133 波：如意在用户把语音识别切走时打它）
 
 安全闸（方案 §2.2，不许放宽）：只绑 127.0.0.1；Host 头必须是 127.0.0.1:<port> / localhost:<port>，
 否则 403（防 DNS rebinding）；带 Origin 头一律 403（如意服务端用 Node fetch 出站，不带 Origin）；
@@ -66,20 +67,49 @@ class Settings:
         ap.add_argument("--device", default=env.get("RUYI_ASR_DEVICE", "auto").strip() or "auto")
         ap.add_argument("--dtype", default=env.get("RUYI_ASR_DTYPE", "auto").strip() or "auto")
         ap.add_argument("--log-level", default=env.get("RUYI_ASR_LOG_LEVEL", "INFO").strip() or "INFO")
+        # auto 挑哪份：small（缺省，省显存）／ large（按空闲显存挑最大能装下的，老策略）
+        ap.add_argument("--auto-prefer", default=env.get("RUYI_ASR_AUTO_PREFER", "small").strip() or "small")
         ns = ap.parse_args([] if argv is None else argv)
 
         self.port: int = int(ns.port)
-        from .autopick import AUTO_MODEL_NAME, is_auto  # noqa: PLC0415
+        from .autopick import AUTO_MODEL_NAME, is_auto, normalize_prefer  # noqa: PLC0415
 
         self.auto: bool = is_auto(ns.model)
         self.model_name: str = AUTO_MODEL_NAME if self.auto else (ns.model or "qwen3-asr-0.6b")
         self.model_repo: str = "" if self.auto else MODEL_ALIASES.get(self.model_name.lower(), self.model_name)
         self.model_dir: str = "" if self.auto else ns.model_dir
         self.models_root: str = ns.models_root
+        self.prefer: str = normalize_prefer(ns.auto_prefer)
         self.idle_unload_sec: int = max(0, int(ns.idle_unload_sec))
         self.device: str = ns.device
         self.dtype: str = ns.dtype
         self.log_level: str = ns.log_level
+
+    def catalog(self) -> list[dict]:
+        """如意能选的模型清单。auto 模式：auto ＋ models 目录里每份装好的尺寸（现读现算，下了新模型不用重启）；
+        单模型模式：就那一份。"""
+        if self.auto:
+            from .autopick import catalog  # noqa: PLC0415
+
+            return catalog(self.models_root)
+        return [{"id": self.model_name, "label": self.model_name}]
+
+    def resolve_model(self, requested: str) -> str:
+        """请求里的 model 字段 → 给引擎的名字。空／不认识的名字 → 缺省（如意填 whisper-1 也照转，老判据）；
+        auto 模式下认 auto 与清单里的每份尺寸。"""
+        key = str(requested or "").strip().lower()
+        if not key:
+            return self.model_name
+        if not self.auto:
+            return self.model_name
+        from .autopick import AUTO_MODEL_NAME, is_auto  # noqa: PLC0415
+
+        if is_auto(key):
+            return AUTO_MODEL_NAME
+        for m in self.catalog():
+            if m["id"] == key:
+                return key
+        return self.model_name
 
 
 def _env_int(env, key: str, default: int) -> int:
@@ -170,9 +200,9 @@ class ShimHandler(BaseHTTPRequestHandler):
             return self._health()
         if path == "/v1/models":
             return self._models()
-        if path == "/v1/audio/transcriptions":
+        if path in ("/v1/audio/transcriptions", "/v1/unload"):
             return self._fail(405, "method_not_allowed", "该端点只接受 POST。")
-        return self._fail(404, "not_found", "没有这条路径。本服务只有 /health、/v1/models、/v1/audio/transcriptions。")
+        return self._fail(404, "not_found", "没有这条路径。本服务只有 /health、/v1/models、/v1/audio/transcriptions、/v1/unload。")
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._gate():
@@ -180,12 +210,14 @@ class ShimHandler(BaseHTTPRequestHandler):
         path = self._path()
         if path == "/v1/audio/transcriptions":
             return self._transcribe()
+        if path == "/v1/unload":
+            return self._unload()
         if path in ("/health", "/v1/models"):
             return self._fail(405, "method_not_allowed", "该端点只接受 GET。", close=True)
         return self._fail(
             404,
             "not_found",
-            "没有这条路径。本服务只有 /health、/v1/models、/v1/audio/transcriptions。",
+            "没有这条路径。本服务只有 /health、/v1/models、/v1/audio/transcriptions、/v1/unload。",
             close=True,
         )
 
@@ -217,11 +249,12 @@ class ShimHandler(BaseHTTPRequestHandler):
                 "component": COMPONENT_NAME_TAG,
                 "version": __version__,
                 "model": self.settings.model_name,
-                # auto 模式下加载后才知道挑了哪份；没加载或非 auto 就是 model 本身
+                # 加载后才知道实际是哪份（auto 挑的／请求点名的）；没加载就是缺省名
                 "resolvedModel": st.get("model") or self.settings.model_name,
                 "loaded": st["loaded"],
                 "device": st["device"],
                 "idleUnloadSec": self.settings.idle_unload_sec,
+                "models": [m["id"] for m in self.settings.catalog()],
             },
         )
 
@@ -231,15 +264,29 @@ class ShimHandler(BaseHTTPRequestHandler):
             {
                 "object": "list",
                 "data": [
-                    {
-                        "id": self.settings.model_name,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": "ruyi-asr-shim",
-                    }
+                    {"id": m["id"], "object": "model", "created": 0, "owned_by": "ruyi-asr-shim", "label": m["label"]}
+                    for m in self.settings.catalog()
                 ],
             },
         )
+
+    def _unload(self) -> None:
+        """立刻卸载：在途的那一发转完才卸（引擎那把锁），所以可能等上一两秒。不读体、不要求体。"""
+        # 体若有就吃掉（Content-Length 为 0 或没有都行），别让残余字节污染下一个请求。
+        raw_len = self.headers.get("Content-Length")
+        try:
+            n = int(raw_len) if raw_len else 0
+        except ValueError:
+            n = 0
+        if 0 < n <= 65536:
+            self.rfile.read(n)
+        elif n > 65536:
+            self._fail(413, "payload_too_large", "/v1/unload 不收请求体。", close=True)
+            return
+        t0 = time.monotonic()
+        did = self.manager.unload_now()
+        LOG.info("unload requested did=%s ms=%d", did, int((time.monotonic() - t0) * 1000))
+        self._send(200, {"ok": True, "unloaded": bool(did), "loaded": False})
 
     def _read_body(self) -> bytes | None:
         """读请求体，带 25 MB 双道闸（Content-Length 预检 + 累计），超了自己回 413。"""
@@ -378,7 +425,8 @@ class ShimHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = self.manager.transcribe(pcm, language=language, prompt=prompt)
+            result = self.manager.transcribe(pcm, language=language, prompt=prompt,
+                                             model=self.settings.resolve_model(requested_model))
         except UnsupportedAudioError as exc:
             LOG.info("asr reject: engine rejected audio")
             self._fail(415, "unsupported_media_type", str(exc))
@@ -475,16 +523,22 @@ def serve(settings: Settings | None = None) -> int:
 
     from .engine import make_backend
 
-    manager = EngineManager(
-        backend_factory=lambda: make_backend(
-            model_repo=settings.model_repo,
-            model_dir=settings.model_dir,
-            device=settings.device,
-            dtype=settings.dtype,
-            models_root=settings.models_root if settings.auto else "",
-        ),
-        idle_unload_sec=settings.idle_unload_sec,
-    )
+    def factory(model_name: str = ""):
+        # auto 模式：点名某个尺寸 → 直接指到 models 目录里那一份；auto／空 → 让后端按 autopick 挑（缺省最省显存的那份）。
+        if settings.auto:
+            from .autopick import by_name, is_auto  # noqa: PLC0415
+
+            cand = None if is_auto(model_name) else by_name(model_name)
+            if cand is not None:
+                return make_backend(model_repo=cand.repo, model_dir=os.path.join(settings.models_root, cand.dirname),
+                                    device=settings.device, dtype=settings.dtype)
+            return make_backend(model_repo="", model_dir="", device=settings.device, dtype=settings.dtype,
+                                models_root=settings.models_root, prefer=settings.prefer)
+        return make_backend(model_repo=settings.model_repo, model_dir=settings.model_dir,
+                            device=settings.device, dtype=settings.dtype)
+
+    manager = EngineManager(backend_factory=factory, idle_unload_sec=settings.idle_unload_sec,
+                            default_model=settings.model_name)
 
     try:
         httpd = build_server(settings, manager)
@@ -501,8 +555,10 @@ def serve(settings: Settings | None = None) -> int:
 
     LOG.info("ruyi-asr-shim %s 已监听 http://127.0.0.1:%d", __version__, settings.port)
     if settings.auto:
-        LOG.info("模型：auto（models 目录 %s；第一发请求时按空闲显存挑最大能装下的），空闲 %d 秒卸载%s",
-                 settings.models_root or "-", settings.idle_unload_sec, "（0 = 常驻）" if settings.idle_unload_sec == 0 else "")
+        LOG.info("模型：auto（models 目录 %s；可选 %s；auto 缺省挑%s），空闲 %d 秒卸载%s",
+                 settings.models_root or "-", "/".join(m["id"] for m in settings.catalog()),
+                 "最省显存的那份" if settings.prefer == "small" else "最大能装下的那份",
+                 settings.idle_unload_sec, "（0 = 常驻）" if settings.idle_unload_sec == 0 else "")
     else:
         LOG.info("模型：%s（仓库 %s），懒加载，空闲 %d 秒卸载%s",
                  settings.model_name, settings.model_repo, settings.idle_unload_sec,

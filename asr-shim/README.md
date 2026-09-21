@@ -43,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 | --- | --- |
 | 地址 baseUrl | `http://127.0.0.1:8790/v1`（不带 `/v1` 也行，如意会自己补） |
 | API Key | 留空 |
-| 模型 | `qwen3-asr-0.6b` |
+| 模型 | `qwen3-asr-0.6b`（auto 登记时可选 `qwen3-asr-auto` / `qwen3-asr-0.6b` / `qwen3-asr-1.7b`） |
 | 接口类型 / 协议 | **通用型（transcriptions）**，不要选「对话型 chat-audio」 |
 
 然后在语音识别设置里选这条服务商 + 这个模型。
@@ -126,8 +126,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 | `RUYI_ASR_PORT` | `8790` | 监听端口。**如意可能会另挑一个端口经这个变量告诉本服务，以它为准。** |
 | `RUYI_ASR_MODEL_DIR` | 空 | 本地模型目录。不填就尝试联网下载（大陆可能很慢）。 |
 | `RUYI_ASR_MODEL` | `qwen3-asr-0.6b` | 也可 `qwen3-asr-1.7b`，或 **`auto`**（见下一行）。这个名字就是如意里要填的模型名（auto 时显示为 `qwen3-asr-auto`）。 |
-| `RUYI_ASR_MODELS_ROOT` | 空 | 配合 `RUYI_ASR_MODEL=auto`：`models` 目录。里面有几份（0.6B／1.7B）就在第一发请求时**按空闲显存挑最大能装下的**（1.7B 要约 4.8 GB 空闲，0.6B 约 2.2 GB；没显卡挑最小的）。`download-model.ps1` 缺省就这样登记，以后再下一份更大的不用重新登记。`/health` 的 `resolvedModel` 报实际挑中的那份。 |
-| `RUYI_ASR_IDLE_UNLOAD_SEC` | `600` | 空闲多少秒卸载模型。`0` = 常驻不卸。 |
+| `RUYI_ASR_MODELS_ROOT` | 空 | 配合 `RUYI_ASR_MODEL=auto`：`models` 目录。`download-model.ps1` 缺省就这样登记，并把目录里每份装好的尺寸（0.6B／1.7B）都列进登记文件的 `provides[0].models`，如意的语音设置里就能逐份选：**auto 缺省用最省显存的那份（0.6B）**，要更准的在如意里选 `qwen3-asr-1.7b`（约 5 GB 显存）。转写请求里的 `model` 字段点名哪份就加载哪份（换尺寸先卸旧的再载新的，显存里最多一份）。`/health` 的 `resolvedModel` 报实际加载的那份，`models` 报可选清单。下了新尺寸要重跑 `download-model.ps1`（它会重新登记）。 |
+| `RUYI_ASR_AUTO_PREFER` | `small` | auto 挑哪份：`small` 最省显存的；`large` 按空闲显存挑最大能装下的（1.7B 要约 4.8 GB 空闲，0.6B 约 2.2 GB；没显卡挑最小的）。 |
+| `RUYI_ASR_IDLE_UNLOAD_SEC` | `600` | 空闲多少秒卸载模型。`0` = 常驻不卸。另外 `POST /v1/unload` 立刻卸载（如意在用户把语音识别切走时会打它）。 |
 | `RUYI_ASR_DEVICE` | `auto` | `auto` / `cuda` / `amd`(=`rocm`) / `xpu` / `mps` / `directml` / `cpu`。见下。 |
 | `RUYI_ASR_DTYPE` | `auto` | `auto` / `bfloat16` / `float16` / `float32`。 |
 | `RUYI_ASR_LOG_LEVEL` | `INFO` | |

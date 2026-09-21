@@ -107,10 +107,11 @@ if ($NoRegister) {
     exit 0
 }
 
-# 登记成 auto：models 目录里有几份（0.6B / 1.7B）就在第一发请求时按空闲显存挑最大能装下的；
-# 以后再下一份更大的，不用重新登记。想钉死某一份：register --model-dir <目录> --model <名>。
+# 登记成 auto：models 目录里每份装好的尺寸（0.6B / 1.7B）都列进登记文件，如意的语音设置里逐份可选；
+# auto 缺省用最省显存的那份（0.6B）。再下一份新尺寸要重跑本脚本（重新登记才会列进去）。
+# 想钉死某一份：register --model-dir <目录> --model <名>。
 Write-Host ""
-Write-Host "==> 向如意登记本组件（auto：按显存挑最大能装下的模型）" -ForegroundColor Cyan
+Write-Host "==> 向如意登记本组件（auto 先用 0.6B；装了 1.7B 的话在如意语音设置里可选）" -ForegroundColor Cyan
 & $py -m ruyi_asr_shim register --model auto --models-root $modelsRoot
 if ($LASTEXITCODE -ne 0) {
     Write-Host "登记没成（见上面的原因）。服务本身仍然可以手动起：scripts\start.ps1" -ForegroundColor Yellow

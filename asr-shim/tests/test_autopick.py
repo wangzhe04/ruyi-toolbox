@@ -1,4 +1,4 @@
-"""模型自动挑选（用户 2026-09-21 拍板「有多份就用更大的，显存允许的话」）：纯函数，不碰 torch。"""
+"""模型自动挑选与清单（用户 2026-09-21 下午拍板：auto 缺省 0.6B、其余尺寸在如意里自己选）：纯函数，不碰 torch。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ruyi_asr_shim.autopick import AUTO_MODEL_NAME, CANDIDATES, free_vram_mb, installed, is_auto, looks_installed, pick
+from ruyi_asr_shim.autopick import AUTO_MODEL_NAME, CANDIDATES, by_name, catalog, free_vram_mb, installed, is_auto, looks_installed, normalize_prefer, pick
 from ruyi_asr_shim.registry import DIR_ENV, build_record, register, registration_path, self_check
 
 
@@ -58,20 +58,48 @@ class AutopickTest(unittest.TestCase):
         self.assertFalse(looks_installed(os.path.join(self.tmp, "nope")))
         self.assertEqual(installed(os.path.join(self.tmp, "nope")), [])
 
-    def test_pick_largest_that_fits(self):
+    def test_pick_default_is_smallest(self):
+        """用户 2026-09-21 下午改口:auto 缺省 0.6B(省显存),1.7B 让用户在如意里自己选。"""
         make_model(self.tmp, "Qwen3-ASR-0.6B-hf")
         make_model(self.tmp, "Qwen3-ASR-1.7B-hf")
-        c, why = pick(self.tmp, 8000)
-        self.assertEqual(c.name, "qwen3-asr-1.7b")
-        self.assertIn("最大能装下", why)
-        c, _ = pick(self.tmp, 3000)
-        self.assertEqual(c.name, "qwen3-asr-0.6b")
+        for free in (8000, 3000, None):
+            c, why = pick(self.tmp, free)
+            self.assertEqual(c.name, "qwen3-asr-0.6b", "free=%r" % free)
+            self.assertIn("省显存", why)
         c, why = pick(self.tmp, 1000)
         self.assertEqual(c.name, "qwen3-asr-0.6b")
+        self.assertIn("少", why)
+
+    def test_pick_prefer_large_keeps_old_policy(self):
+        make_model(self.tmp, "Qwen3-ASR-0.6B-hf")
+        make_model(self.tmp, "Qwen3-ASR-1.7B-hf")
+        c, why = pick(self.tmp, 8000, prefer="large")
+        self.assertEqual(c.name, "qwen3-asr-1.7b")
+        self.assertIn("最大能装下", why)
+        c, _ = pick(self.tmp, 3000, prefer="large")
+        self.assertEqual(c.name, "qwen3-asr-0.6b")
+        c, why = pick(self.tmp, 1000, prefer="large")
+        self.assertEqual(c.name, "qwen3-asr-0.6b")
         self.assertIn("不够", why)
-        c, why = pick(self.tmp, None)
+        c, why = pick(self.tmp, None, prefer="large")
         self.assertEqual(c.name, "qwen3-asr-0.6b")
         self.assertIn("没有显卡", why)
+        self.assertEqual(normalize_prefer("LARGE"), "large")
+        self.assertEqual(normalize_prefer("whatever"), "small")
+
+    def test_catalog_and_by_name(self):
+        """清单:auto 在前,装好的尺寸按小到大;每项带给设置页看的 label。"""
+        self.assertEqual([m["id"] for m in catalog(self.tmp)], [AUTO_MODEL_NAME], "一份都没装也列 auto")
+        make_model(self.tmp, "Qwen3-ASR-1.7B-hf")
+        self.assertEqual([m["id"] for m in catalog(self.tmp)], [AUTO_MODEL_NAME, "qwen3-asr-1.7b"])
+        make_model(self.tmp, "Qwen3-ASR-0.6B-hf")
+        cat = catalog(self.tmp)
+        self.assertEqual([m["id"] for m in cat], [AUTO_MODEL_NAME, "qwen3-asr-0.6b", "qwen3-asr-1.7b"])
+        self.assertTrue(all(m["label"] for m in cat))
+        self.assertIn("显存", cat[2]["label"])
+        self.assertEqual(by_name("QWEN3-ASR-1.7B").dirname, "Qwen3-ASR-1.7B-hf")
+        self.assertIsNone(by_name("whisper-1"))
+        self.assertIsNone(by_name(AUTO_MODEL_NAME), "auto 不是一份具体的尺寸")
 
     def test_pick_only_one_installed_or_none(self):
         make_model(self.tmp, "Qwen3-ASR-1.7B-hf")
@@ -109,9 +137,18 @@ class AutoRegistryTest(unittest.TestCase):
         rec = build_record(python_exe="C:\\py.exe", cwd="C:\\x", model_dir="", model_name="auto", port=8790, models_root="C:\\m")
         self.assertEqual(rec["run"]["env"], {"RUYI_ASR_MODEL": "auto", "RUYI_ASR_MODELS_ROOT": "C:\\m"})
         self.assertEqual(rec["provides"][0]["model"], AUTO_MODEL_NAME)
+        self.assertEqual(rec["service"]["unload"], "/v1/unload", "133:切走即卸载的那条路要写进登记")
+        self.assertEqual([m["id"] for m in rec["provides"][0]["models"]], [AUTO_MODEL_NAME], "C:\\m 里一份都没装 → 清单只有 auto")
         rec2 = build_record(python_exe="C:\\py.exe", cwd="C:\\x", model_dir="C:\\m\\a", model_name="qwen3-asr-1.7b", port=8790)
         self.assertEqual(rec2["run"]["env"], {"RUYI_ASR_MODEL_DIR": "C:\\m\\a", "RUYI_ASR_MODEL": "qwen3-asr-1.7b"})
         self.assertEqual(rec2["provides"][0]["model"], "qwen3-asr-1.7b")
+        self.assertNotIn("models", rec2["provides"][0], "单模型模式不列清单")
+
+    def test_record_lists_installed_sizes(self):
+        make_model(self.root, "Qwen3-ASR-1.7B-hf")
+        rec = build_record(python_exe="C:\\py.exe", cwd="C:\\x", model_dir="", model_name="auto", port=8790, models_root=self.root)
+        self.assertEqual([m["id"] for m in rec["provides"][0]["models"]], [AUTO_MODEL_NAME, "qwen3-asr-0.6b", "qwen3-asr-1.7b"])
+        self.assertTrue(all(isinstance(m["label"], str) and m["label"] for m in rec["provides"][0]["models"]))
 
     def test_register_auto(self):
         out = io.StringIO()

@@ -35,11 +35,12 @@ WINDOW_MARGIN_SEC = 2.0  # 留点余量，别顶着上限喂
 
 class Qwen3AsrBackend:
     def __init__(self, model_repo: str, model_dir: str = "", device: str = "auto",
-                 dtype: str = "auto", models_root: str = ""):
+                 dtype: str = "auto", models_root: str = "", prefer: str = "small"):
         self.model_repo = model_repo
         self.model_dir = (model_dir or "").strip()
-        # auto 模式：给 models_root、不给 model_dir；load() 里探完设备再按空闲显存挑（autopick.py）
+        # auto 模式：给 models_root、不给 model_dir；load() 里探完设备再挑（autopick.py：缺省最省显存的那份）
         self.models_root = (models_root or "").strip()
+        self.prefer = prefer
         self.resolved_model = "" if self.models_root else _name_of(model_repo)
         self.device_pref = (device or "auto").strip().lower() or "auto"
         self.dtype_pref = (dtype or "auto").strip().lower() or "auto"
@@ -78,7 +79,7 @@ class Qwen3AsrBackend:
             from .autopick import free_vram_mb, pick  # noqa: PLC0415
 
             free_mb = free_vram_mb(torch) if choice.device == "cuda" else None
-            cand, why = pick(self.models_root, free_mb)
+            cand, why = pick(self.models_root, free_mb, self.prefer)
             if cand is None:
                 raise FileNotFoundError(why + "（先跑 scripts/download-model.ps1）")
             self.model_dir = os.path.join(self.models_root, cand.dirname)

@@ -35,18 +35,25 @@ class Backend(Protocol):
 
 
 class EngineManager:
-    """一把锁串行；第一发请求才加载；空闲到点卸载。"""
+    """一把锁串行；第一发请求才加载；空闲到点卸载。
+
+    第 133 波：一个进程管多份模型（0.6B／1.7B／auto）—— 同一时刻只加载【一份】。请求带 model 且与已加载的不是同一份
+    → 先卸掉再加载要的那份（显存里永远最多一份）；`unload_now()` 给如意「用户切走了 → 立刻释放显存」用。
+    工厂 `backend_factory(model_name)` 按名造后端；老式无参工厂照样收（测试与单模型模式）。
+    """
 
     def __init__(
         self,
-        backend_factory: Callable[[], Backend],
+        backend_factory: Callable[..., Backend],
         idle_unload_sec: int = 600,
         *,
         clock: Callable[[], float] = time.monotonic,
+        default_model: str = "",
     ):
         self._factory = backend_factory
         self._idle_sec = max(0, int(idle_unload_sec))
         self._clock = clock
+        self._default_model = str(default_model or "")
         self._lock = threading.Lock()          # 串行闸：加载与推理共用
         self._state_lock = threading.Lock()    # 只保护下面这几个小字段
         self._backend: Backend | None = None
@@ -54,7 +61,8 @@ class EngineManager:
         self._load_count = 0
         self._unload_count = 0
         self._device = "unknown"
-        self._model = ""                        # auto 模式下加载后才知道挑了哪份
+        self._model = ""                        # 加载后后端报的实际那份（auto 模式下才知道挑了哪份）
+        self._requested = ""                    # 这份后端是按哪个名字造的（"" / auto / qwen3-asr-0.6b …）
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
 
@@ -66,10 +74,26 @@ class EngineManager:
                 "loaded": self._backend is not None,
                 "device": self._device,
                 "model": self._model,
+                "requested": self._requested,
                 "loadCount": self._load_count,
                 "unloadCount": self._unload_count,
                 "idleUnloadSec": self._idle_sec,
             }
+
+    def _make(self, model: str) -> Backend:
+        """按名造后端；工厂不收参数（老式）就裸调。"""
+        try:
+            return self._factory(model)
+        except TypeError as exc:
+            if "positional argument" not in str(exc) and "takes 0" not in str(exc):
+                raise
+            return self._factory()
+
+    def _same_model(self, requested: str) -> bool:
+        """已加载的那份能不能直接服务这个请求：名字相同，或请求的正是 auto 实际挑中的那份。"""
+        if not requested or requested == self._requested:
+            return True
+        return bool(self._model) and requested == self._model
 
     @property
     def load_count(self) -> int:
@@ -91,10 +115,11 @@ class EngineManager:
 
     # ── 主路径 ────────────────────────────────────────────────────────────
 
-    def transcribe(self, pcm: AudioBuffer, language: str | None = None, prompt: str | None = None) -> dict:
+    def transcribe(self, pcm: AudioBuffer, language: str | None = None, prompt: str | None = None,
+                   model: str | None = None) -> dict:
         # 锁住整段：加载与推理都在里面。`with` 保证抛异常时锁一定被放开（判据之一）。
         with self._lock:
-            backend = self._ensure_loaded()
+            backend = self._ensure_loaded(str(model or ""))
             try:
                 result = backend.transcribe(pcm, language, prompt)
             except UnsupportedAudioError:
@@ -110,13 +135,24 @@ class EngineManager:
             raise EngineError("后端回了一个形状不对的结果")
         return result
 
-    def _ensure_loaded(self) -> Backend:
+    def _ensure_loaded(self, requested: str = "") -> Backend:
+        """调用方已持有 self._lock。"""
+        requested = requested or self._default_model
         with self._state_lock:
-            if self._backend is not None:
+            if self._backend is not None and self._same_model(requested):
                 return self._backend
+            stale = self._backend
+            self._backend = None
+        if stale is not None:
+            # 换模型：先把旧的卸干净（显存里最多一份），再加载新的。
+            with self._state_lock:
+                self._unload_count += 1
+                self._device = "unknown"
+            self._do_unload(stale)
+            LOG.info("换模型：已卸载 %s，改加载 %s", self._model or self._requested or "-", requested or "-")
         t0 = self._clock()
         try:
-            backend = self._factory()
+            backend = self._make(requested)
             backend.load()
         except UnsupportedAudioError:
             raise
@@ -125,6 +161,7 @@ class EngineManager:
             raise EngineError("模型加载失败：" + (str(exc)[:400] or type(exc).__name__)) from exc
         with self._state_lock:
             self._backend = backend
+            self._requested = requested
             self._load_count += 1
             self._device = getattr(backend, "device", "unknown")
             self._model = str(getattr(backend, "resolved_model", "") or "")
@@ -132,6 +169,21 @@ class EngineManager:
         LOG.info("模型已加载 device=%s model=%s load_ms=%d", self._device, self._model or "-", int((self._clock() - t0) * 1000))
         self._start_reaper()
         return backend
+
+    def unload_now(self) -> bool:
+        """立刻卸载（如意：用户把语音识别切走了）。等在途的那一发转完再卸；没加载回 False。"""
+        with self._lock:
+            with self._state_lock:
+                backend = self._backend
+                if backend is None:
+                    return False
+                self._backend = None
+                self._unload_count += 1
+                self._device = "unknown"
+                name = self._model or self._requested
+            self._do_unload(backend)
+            LOG.info("按请求卸载模型 %s，已释放显存", name or "-")
+            return True
 
     # ── 空闲卸载 ──────────────────────────────────────────────────────────
 
@@ -206,8 +258,8 @@ class EngineManager:
 # 具体加载与调用形状见 asr-shim/docs/backend-notes.md（含查证来源与日期）。
 
 def make_backend(model_repo: str, model_dir: str = "", device: str = "auto",
-                 dtype: str = "auto", models_root: str = "") -> Backend:
+                 dtype: str = "auto", models_root: str = "", prefer: str = "small") -> Backend:
     from .qwen_backend import Qwen3AsrBackend
 
     return Qwen3AsrBackend(model_repo=model_repo, model_dir=model_dir,
-                           device=device, dtype=dtype, models_root=models_root)
+                           device=device, dtype=dtype, models_root=models_root, prefer=prefer)

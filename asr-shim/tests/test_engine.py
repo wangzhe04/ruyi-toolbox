@@ -220,5 +220,94 @@ class TestErrors(unittest.TestCase):
         self.assertFalse(m.loaded)
 
 
+
+class TestModelSwitch(unittest.TestCase):
+    """第 133 波:一个进程管多份模型 —— 同一时刻最多加载一份;请求点名另一份就先卸后载;unload_now 立刻释放。"""
+
+    def make_factory(self, rec):
+        made = []
+
+        def factory(model_name=""):
+            b = FakeBackend(rec, text="来自 " + (model_name or "缺省"))
+            # auto 那份「实际挑中」的名字由后端报;这里模拟 auto → 0.6b
+            b.resolved_model = "qwen3-asr-0.6b" if model_name in ("", "qwen3-asr-auto") else model_name
+            made.append(model_name)
+            return b
+
+        return factory, made
+
+    def test_same_model_does_not_reload(self):
+        rec = Recorder()
+        factory, made = self.make_factory(rec)
+        m = EngineManager(factory, idle_unload_sec=0, default_model="qwen3-asr-auto")
+        m.transcribe(pcm(), model="qwen3-asr-auto")
+        m.transcribe(pcm())                       # 空 = 缺省(auto)
+        m.transcribe(pcm(), model="qwen3-asr-0.6b")  # auto 实际挑的就是 0.6b → 不换
+        self.assertEqual(rec.loads, 1)
+        self.assertEqual(rec.unloads, 0)
+        self.assertEqual(made, ["qwen3-asr-auto"])
+        self.assertEqual(m.status()["model"], "qwen3-asr-0.6b")
+        self.assertEqual(m.status()["requested"], "qwen3-asr-auto")
+        m.shutdown()
+
+    def test_switch_unloads_before_loading_other(self):
+        rec = Recorder()
+        factory, made = self.make_factory(rec)
+        m = EngineManager(factory, idle_unload_sec=0, default_model="qwen3-asr-auto")
+        self.assertEqual(m.transcribe(pcm())["text"], "来自 qwen3-asr-auto")
+        self.assertEqual(m.transcribe(pcm(), model="qwen3-asr-1.7b")["text"], "来自 qwen3-asr-1.7b")
+        self.assertEqual((rec.loads, rec.unloads), (2, 1), "先卸 0.6b 再载 1.7b:显存里最多一份")
+        self.assertEqual(m.status()["model"], "qwen3-asr-1.7b")
+        self.assertEqual(m.transcribe(pcm(), model="qwen3-asr-1.7b")["text"], "来自 qwen3-asr-1.7b")
+        self.assertEqual(rec.loads, 2, "同一份不重载")
+        self.assertEqual(m.transcribe(pcm(), model="qwen3-asr-auto")["text"], "来自 qwen3-asr-auto")
+        self.assertEqual((rec.loads, rec.unloads), (3, 2))
+        self.assertEqual(made, ["qwen3-asr-auto", "qwen3-asr-1.7b", "qwen3-asr-auto"])
+        m.shutdown()
+
+    def test_unload_now(self):
+        rec = Recorder()
+        factory, _made = self.make_factory(rec)
+        m = EngineManager(factory, idle_unload_sec=0)
+        self.assertFalse(m.unload_now(), "没加载回 False")
+        m.transcribe(pcm())
+        self.assertTrue(m.loaded)
+        self.assertTrue(m.unload_now())
+        self.assertFalse(m.loaded)
+        self.assertEqual((rec.loads, rec.unloads), (1, 1))
+        self.assertEqual(m.status()["device"], "unknown")
+        m.transcribe(pcm())
+        self.assertEqual(rec.loads, 2, "卸了还能再载")
+        m.shutdown()
+
+    def test_unload_now_waits_for_inflight(self):
+        rec = Recorder()
+        m = EngineManager(lambda: FakeBackend(rec, call_sleep=0.3), idle_unload_sec=0)
+        m.transcribe(pcm())
+        results = {}
+
+        def worker():
+            results["r"] = m.transcribe(pcm())
+
+        th = threading.Thread(target=worker)
+        th.start()
+        time.sleep(0.05)
+        t0 = time.monotonic()
+        self.assertTrue(m.unload_now())
+        self.assertGreaterEqual(time.monotonic() - t0, 0.2, "在途那一发转完才卸")
+        th.join(5)
+        self.assertEqual(results["r"]["text"], "你好世界", "在途请求不受影响")
+        self.assertEqual(rec.unloads, 1)
+        m.shutdown()
+
+    def test_old_style_factory_still_works(self):
+        rec = Recorder()
+        m = EngineManager(lambda: FakeBackend(rec), idle_unload_sec=0)
+        m.transcribe(pcm(), model="whatever")
+        m.transcribe(pcm(), model="other")
+        self.assertEqual(rec.loads, 2, "无参工厂造不出别的尺寸,但换名字照样走「先卸后载」的路径")
+        m.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -24,12 +24,12 @@ from .helpers import FakeBackend, Recorder, build_multipart, make_wav
 
 
 class ServerFixture:
-    def __init__(self, factory=None, **backend_kw):
+    def __init__(self, factory=None, settings_args=None, **backend_kw):
         self.rec = Recorder()
         self.port = pick_free_port()
-        self.settings = Settings(["--port", str(self.port), "--idle-unload-sec", "0"])
+        self.settings = Settings(["--port", str(self.port), "--idle-unload-sec", "0"] + list(settings_args or []))
         make = factory or (lambda: FakeBackend(self.rec, **backend_kw))
-        self.manager = EngineManager(make, idle_unload_sec=0)
+        self.manager = EngineManager(make, idle_unload_sec=0, default_model=self.settings.model_name)
         self.httpd = build_server(self.settings, self.manager)
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05},
                                        daemon=True)
@@ -379,6 +379,101 @@ class TestPrivacy(unittest.TestCase):
 def _multipart_kw(fields):
     ctype, body = build_multipart(fields, [("file", "clip.wav", "audio/wav", make_wav(0.3))])
     return {"body": body, "headers": {"Content-Type": ctype}}
+
+
+
+def make_model_dir(root: str, dirname: str) -> str:
+    d = os.path.join(root, dirname)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as f:
+        f.write("{}")
+    with open(os.path.join(d, "model.safetensors"), "wb") as f:
+        f.write(b"x")
+    return d
+
+
+class TestModelCatalogAndUnload(unittest.TestCase):
+    """第 133 波:auto 模式下 /v1/models 列出 auto ＋ 每份装好的尺寸;转写请求的 model 字段选尺寸;POST /v1/unload 立刻卸载。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="asr-catalog-")
+        make_model_dir(self.tmp, "Qwen3-ASR-0.6B-hf")
+        make_model_dir(self.tmp, "Qwen3-ASR-1.7B-hf")
+        self.rec = Recorder()
+        self.made = []
+
+        def factory(model_name=""):
+            b = FakeBackend(self.rec, text="by " + (model_name or "-"))
+            b.resolved_model = "qwen3-asr-0.6b" if model_name in ("", "qwen3-asr-auto") else model_name
+            self.made.append(model_name)
+            return b
+
+        self.factory = factory
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def fixture(self):
+        return ServerFixture(factory=self.factory, settings_args=["--model", "auto", "--models-root", self.tmp])
+
+    def test_models_lists_auto_and_installed_sizes(self):
+        with self.fixture() as s:
+            status, _h, body = s.json_request("GET", "/v1/models")
+            self.assertEqual(status, 200)
+            self.assertEqual([m["id"] for m in body["data"]], ["qwen3-asr-auto", "qwen3-asr-0.6b", "qwen3-asr-1.7b"])
+            self.assertTrue(all(m["label"] for m in body["data"]))
+            status, _h, health = s.json_request("GET", "/health")
+            self.assertEqual(health["models"], ["qwen3-asr-auto", "qwen3-asr-0.6b", "qwen3-asr-1.7b"])
+            self.assertEqual(health["model"], "qwen3-asr-auto")
+            self.assertEqual(self.rec.loads, 0, "列清单不加载")
+
+    def test_single_model_mode_lists_only_itself(self):
+        with ServerFixture() as s:
+            _st, _h, body = s.json_request("GET", "/v1/models")
+            self.assertEqual([m["id"] for m in body["data"]], ["qwen3-asr-0.6b"])
+
+    def test_model_field_switches_size(self):
+        with self.fixture() as s:
+            _st, _h, body = s.transcribe(fields={"model": "qwen3-asr-auto"})
+            self.assertEqual(body["text"], "by qwen3-asr-auto")
+            _st, _h, body = s.transcribe(fields={"model": "qwen3-asr-0.6b"})
+            self.assertEqual(body["text"], "by qwen3-asr-auto", "auto 已经挑中 0.6b → 点名 0.6b 不换")
+            self.assertEqual(self.rec.loads, 1)
+            _st, _h, body = s.transcribe(fields={"model": "qwen3-asr-1.7b"})
+            self.assertEqual(body["text"], "by qwen3-asr-1.7b")
+            self.assertEqual((self.rec.loads, self.rec.unloads), (2, 1), "先卸 0.6b 再载 1.7b")
+            _st, _h, health = s.json_request("GET", "/health")
+            self.assertEqual(health["resolvedModel"], "qwen3-asr-1.7b")
+            self.assertTrue(health["loaded"])
+            _st, _h, body = s.transcribe(fields={"model": "whisper-1"})
+            self.assertEqual(body["text"], "by qwen3-asr-auto", "不认识的名字回落缺省(auto),老判据「填什么都能转」不变")
+            self.assertEqual(self.made, ["qwen3-asr-auto", "qwen3-asr-1.7b", "qwen3-asr-auto"])
+
+    def test_unload_route(self):
+        with self.fixture() as s:
+            status, _h, body = s.json_request("POST", "/v1/unload")
+            self.assertEqual(status, 200)
+            self.assertEqual(body, {"ok": True, "unloaded": False, "loaded": False})
+            s.transcribe()
+            self.assertEqual(self.rec.loads, 1)
+            status, _h, body = s.json_request("POST", "/v1/unload", body=b"", headers={"Content-Length": "0"})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["unloaded"], True)
+            self.assertEqual(self.rec.unloads, 1)
+            _st, _h, health = s.json_request("GET", "/health")
+            self.assertFalse(health["loaded"])
+            self.assertEqual(s.json_request("GET", "/v1/unload")[0], 405, "只收 POST")
+            s.transcribe()
+            self.assertEqual(self.rec.loads, 2, "卸了还能再载")
+
+    def test_unload_gate_applies(self):
+        with self.fixture() as s:
+            status, _h, _b = s.json_request("POST", "/v1/unload", headers={"Origin": "http://evil.example"})
+            self.assertEqual(status, 403)
+            status, _h, _b = s.json_request("POST", "/v1/unload", host="evil.example:80")
+            self.assertEqual(status, 403)
 
 
 if __name__ == "__main__":

@@ -96,15 +96,18 @@ def build_record(
     now: datetime | None = None,
     models_root: str = "",
 ) -> dict:
-    from .autopick import AUTO_MODEL_NAME, is_auto  # noqa: PLC0415
+    from .autopick import AUTO_MODEL_NAME, catalog, is_auto  # noqa: PLC0415
 
     env: dict[str, str] = {}
+    models: list[dict] = []
     if models_root and is_auto(model_name):
-        # 用户 2026-09-21 拍板：有多份本地模型就默认用更大的（显存允许的话）。登记只记 models 根目录，
-        # 挑哪份在第一发请求时决定（autopick.py）；如意里显示的模型名固定为 qwen3-asr-auto。
+        # 登记只记 models 根目录；auto 挑哪份在加载时决定（autopick.py：缺省最省显存的那份）。
+        # 第 133 波：provides.models 把 auto 与每份装好的尺寸都列出来，用户在如意的语音设置里自己挑（1.7B 更准但占 5 GB 显存）；
+        # 如意按登记文件画清单，所以下了新尺寸要重跑 download-model.ps1（它会重新登记）。
         env["RUYI_ASR_MODEL"] = "auto"
         env["RUYI_ASR_MODELS_ROOT"] = models_root
         model_name = AUTO_MODEL_NAME
+        models = catalog(models_root)
     else:
         if model_dir:
             env["RUYI_ASR_MODEL_DIR"] = model_dir
@@ -128,6 +131,8 @@ def build_record(
             "portEnv": "RUYI_ASR_PORT",
             "health": "/health",
             "component": COMPONENT_NAME_TAG,
+            # 第 133 波：如意在用户把语音识别切走（换模型／换服务商／关掉）时 POST 这条路，立刻释放显存
+            "unload": "/v1/unload",
         },
         "provides": [
             {
@@ -135,6 +140,8 @@ def build_record(
                 "basePath": "/v1",
                 "model": model_name,
                 "protocol": "transcriptions",
+                # 可选的多尺寸清单（auto 模式才有）；如意老版本不认这个字段就只用 model
+                **({"models": models} if models else {}),
             }
         ],
         "registeredAt": stamp.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (stamp.microsecond // 1000),
