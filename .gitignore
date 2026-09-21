@@ -6,9 +6,14 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# 虚拟环境（各组件各自建在自己目录下）
+# 虚拟环境（各组件各自建在自己目录下；.venv-rocm 这类带后缀的临时环境也要一起挡——
+# uv venv 自己会在里面放一份 .gitignore 兜底，但别靠这个，仓库这一层也该挡住）
 .venv/
+.venv*/
 venv/
+
+# 打包产物（tools/package-bundle.ps1 的默认输出目录；产物是给别人的压缩包，不是给仓库的）
+dist/
 
 # 模型权重与缓存 —— 绝不进 git
 models/

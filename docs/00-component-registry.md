@@ -132,6 +132,7 @@
 2. `register` 先自检、再原子写；`unregister` 删文件（文件不在也算成功）。
 3. 按 §2.2／§2.3 守行为。4. README 写清：装完会登记、如意会自动接入、怎么停用、怎么卸载。
 5. 登记文件里不放任何密钥。
+6. 想让组件能被 `tools/package-bundle.ps1` 自动发现、正确打包（换机器不用手敲安装步骤），照 §6 的清单来。
 
 ## 5. 边界情况怎么算（2026-09-21 联调后补）
 
@@ -141,3 +142,76 @@
 - **自动生成的服务商会出现在如意的服务商列表里**：只提供 `asr` 的组件没有对话接口，被选去对话会得到一个 404。
   这是如意一侧待办（让只做语音的条目不进对话模型候选），组件不用为此做任何事。
 - **Windows 上 venv 的 `python.exe` 是转发壳**：进程表里会有两个 python 进程。如意回收时杀整棵树；组件自己的父进程看门狗是第二道保险。
+
+## 6. 打包与迁移（`tools/package-bundle.ps1`，2026-09-21 起）
+
+装好的组件要挪去另一台机器，不用逐个手敲 `install.ps1`／`download-model.ps1`：根目录的
+[`tools/package-bundle.ps1`](../tools/package-bundle.ps1) 能把**选定的组件**（连同已经下好的模型，可选）打成一个
+压缩包；在新机器上解压、双击里面的「安装并接入如意.cmd」，会给每个组件建好虚拟环境、装好依赖，然后：
+带了模型就直接离线登记，没带就跑该组件自己的 `download-model.ps1`（联网下）。用法见
+[`tools/README.md`](../tools/README.md)；本节是**给组件作者**的——你的组件要满足什么，才会被这个工具正确发现、
+正确打包。
+
+### 6.1 自动发现的最低要求（不满足就不会出现在候选列表里）
+
+1. 组件目录在仓库根目录下一层，或者 `mcp/` 下一层（`mcp/<name>/`）——跟 §1 的「一个组件一个顶层目录」一致，
+   打包器只多认一层嵌套。
+2. 目录里有 `pyproject.toml` 和 `scripts\install.ps1` 这两个文件（路径、大小写都要对）。
+3. `install.ps1` **幂等**、**只用相对自己的路径**（`$here = Split-Path -Parent $MyInvocation.MyCommand.Path`，
+   `$root = Split-Path -Parent $here`，venv 建在 `$root\.venv`）——本仓两个组件的 `install.ps1` 已经是这个形状，
+   照抄就对。打包器生成的 `setup.ps1` 在**任意解压位置**调用它，`install.ps1` 自己算出的路径必须跟着解压位置走，
+   不能硬编码打包时的路径。
+4. 组件的 Python 包目录名形如 `ruyi_<name>/` 且里面有 `__main__.py`——打包器用这个规律猜模块名
+   （给 `python -m <module> register` 用）。两个现有组件（`ruyi_asr_shim`／`ruyi_asr_stream`）都是这样。
+
+### 6.2 `pyproject.toml` 必须显式列出包（不是可选项）
+
+```toml
+[tool.setuptools]
+packages = ["ruyi_你的组件名"]
+```
+
+**没有这一行，打包已下模型时会直接炸**：模型目录（`models/`）会被打包器当成源码的兄弟目录一起放进组件文件夹，
+`uv pip install -e .` 触发 setuptools 的自动包发现，会把 `models/` 也当成一个「顶层包」候选，报
+`Multiple top-level packages discovered in a flat-layout`，`install.ps1` 直接失败。两个现有组件都已经这样写；
+新组件照抄，不要指望「反正我不会打包模型」——你不知道以后谁会想打包。
+
+### 6.3 模型目录的约定（想要「已下模型可选打包」才需要）
+
+- 装模型的地方固定叫 `models/`，紧贴组件根目录（跟 `ruyi_<name>/` 同级）。
+- 每一份可选的模型（不同体量、不同变体）各自一个子目录，目录名就是它的标识（比如 `Qwen3-ASR-0.6B-hf`、
+  `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`）——打包器按子目录名列出候选，不看目录内容。
+- 没有 `models/` 目录也完全没问题：打包器会把该组件归成「没有模型概念」，只打包源码，目标机器直接
+  `register`（无参）。多数 MCP 类组件大概率是这种。
+
+### 6.4 想要「打包时带已下模型 → 目标机器离线登记」，还要做一件事
+
+打包器不会瞎猜你的 `register` 该传什么参数（`--model-dir`？`--models-root`？两个都要？）——这件事登记在
+`tools/package-bundle.ps1` 顶部的 `$script:ComponentOverrides` 表里，你的组件 id 不在表里也能打包（走一条
+通用兜底：一份模型选 `--model-dir`，多份选 `--models-root`，能凑合但不一定对），**想要打包器精确拼出你组件
+认得的参数**，在那张表里加一条：
+
+```powershell
+"你的组件id" = @{
+    Name      = "给人看的名字"
+    ModelKind = "sizes"   # 或 "pair"（流式+离线两个独立槽位，参考 asr-stream 那条）
+    SizeChoices = @(
+        @{ Key = "触发 --model 用的名字"; Dirname = "models 下的子目录名"; Label = "GUI 里显示的说明" }
+    )
+    BuildRegisterArgs = {
+        param($Selection)   # 这次选中了哪些
+        if (-not $Selection -or $Selection.Count -eq 0) { return $null }   # 没选 = 没带模型
+        @("register", "--你的组件认的参数名", (Join-Path "{CompDir}" "models"))   # {CompDir} 别改——目标机器现算真实路径
+    }
+}
+```
+
+`{CompDir}` 是唯一的占位符，`setup.ps1` 在目标机器上把它换成这个组件解压后的真实绝对路径——别的位置不要
+硬编码任何路径（打包时的路径在目标机器上没有意义）。
+
+### 6.5 打包器不管、组件自己已经管好的事
+
+- 打包器**只搬源码 + 你选中的模型子目录**，不碰 `.venv*`（任意后缀）、`__pycache__`、`*.egg-info`、
+  `.pytest_cache` 这类构建产物——目标机器上的虚拟环境永远是 `setup.ps1` 现建的（venv 跨机器不可移植，见
+  `tools/README.md` 的说明），不用担心它们被误打包进去。
+- `tests/`、`samples/` 缺省不打包（开发用，不影响组件运行）；真要带上可以在打包器界面勾「包含测试代码」。
