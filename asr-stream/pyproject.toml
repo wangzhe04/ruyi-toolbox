@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruyi-asr-stream"
+version = "0.1.0"
+description = "把 sherpa-onnx 流式 Zipformer 包成有会话的 HTTP，给如意工作台的麦克风边说边出字"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Ruyi Workbench" }]
+dependencies = [
+  "numpy>=1.24",
+  "sherpa-onnx>=1.12",   # PyPI 有 cp312 win_amd64 轮子，CPU 推理，不用 torch
+]
+
+[project.scripts]
+ruyi-asr-stream = "ruyi_asr_stream.__main__:main"
+
+[tool.setuptools]
+packages = ["ruyi_asr_stream"]

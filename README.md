@@ -18,12 +18,14 @@
 | 目录 | 是什么 | 状态 |
 | --- | --- | --- |
 | [`asr-shim/`](asr-shim/) | 本地语音识别：把 **Qwen3-ASR** 包成 OpenAI 兼容的 `/v1/audio/transcriptions`，音频不出本机 | 可用 |
+| [`asr-stream/`](asr-stream/) | 本地**实时**语音识别：sherpa-onnx 流式 Zipformer，CPU、常驻、边说边出字；与 asr-shim 并用＝手机那种「先出字、句尾自动改错」 | 可用 |
 | [`mcp/`](mcp/) | 以后的补充 MCP server 住这里 | 占位，暂无代码 |
 
 ## 文档
 
 - [`docs/00-component-registry.md`](docs/00-component-registry.md) —— 组件怎么向如意登记自己（两仓之间唯一的对接面）
 - [`docs/01-asr-shim-plan.md`](docs/01-asr-shim-plan.md) —— asr-shim 的方案与交办单
+- [`docs/02-asr-stream-plan.md`](docs/02-asr-stream-plan.md) —— asr-stream 的方案（接口与主仓第 130 波对齐）
 
 ## 约定
 

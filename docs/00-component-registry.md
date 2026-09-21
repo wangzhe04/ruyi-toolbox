@@ -71,6 +71,11 @@
    - `asr`：语音识别端点。如意生成一个服务商条目（地址 `http://127.0.0.1:<实际端口><basePath>`、无密钥、
      模型 `model` 带语音识别标记、`protocol` 取 `transcriptions` 或 `chat-audio`）。**用户还没配过语音识别时自动选中它；
      已经配了别的就只把它列为候选，绝不改用户的选择**；用户后来手动关掉或换走，如意也不会再自动选回来。
+   - `asr-stream`（2026-09-21，第 130 波）：**流式**语音识别端点，给输入框麦克风「边说边出字」用。如意生成一个服务商条目
+     （地址 `http://127.0.0.1:<实际端口><basePath>`、无密钥、模型带 `asr-stream` 标记），自动选中规则与 `asr` 同一套
+     （`asrStreamProviderId`／`asrStreamModel`）。接口是「有会话的 HTTP」而不是 WebSocket，见 `docs/02-asr-stream-plan.md` §2：
+     `POST {basePath}/stream/sessions` → `{id}`；`POST …/sessions/{id}/audio`（16 kHz PCM16LE，单块 ≤ 1 MB）→
+     `{partial, finals:[{text,startMs,endMs}]}`；`POST …/finish`；`DELETE …/{id}`。`protocol` 字段不用。
    - 以后会加 `tts`、`embedding`、`ocr` 等；不认识的 `type` 如意直接跳过（向前兼容），所以组件可以先登记、如意后支持。
 
 服务类组件必须守的行为：
