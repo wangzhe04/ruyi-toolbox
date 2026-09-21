@@ -38,6 +38,9 @@ param(
     [string[]]$Components,
     # 命令行模式专用：每个组件一段，分号隔开。形状见上面 EXAMPLE 与 tools/README.md。
     [string]$Models = "",
+    # 命令行模式专用：组件id=值，分号隔开。没有 GpuTorch 表的组件随便给个非空值（比如 1）；
+    # 有 GpuTorch 表的组件（目前只有 asr-shim）给 GPU 变体 key："cpu" 或 "nvidia"。
+    [string]$OfflineDeps = "",
     [string]$OutputDir = "",
     [string]$ZipName = "",
     [switch]$IncludeTests,
@@ -76,6 +79,13 @@ $script:ComponentOverrides = @{
             if (-not $Selection -or $Selection.Count -eq 0) { return $null }
             @("register", "--model", "auto", "--models-root", (Join-Path "{CompDir}" "models"))
         }
+        # torch 不在 pyproject.toml 的 dependencies 里（install.ps1 自己按显卡挑索引装）——打包离线依赖时
+        # 单独按这张表再下一次。ROCm 用的是固定 wheel 直链而不是 index（见 install.ps1），这里先不支持，
+        # 见 tools/README.md「已知限制」。
+        GpuTorch = @{
+            cpu    = @{ Label = "CPU（体积小，约 200 MB，推理慢）"; IndexUrl = "https://download.pytorch.org/whl/cpu" }
+            nvidia = @{ Label = "NVIDIA（CUDA cu128，约 3 GB）"; IndexUrl = "https://download.pytorch.org/whl/cu128" }
+        }
     }
     "asr-stream" = @{
         Name      = "本地实时语音识别（流式，sherpa-onnx）"
@@ -92,6 +102,55 @@ $script:ComponentOverrides = @{
             $args
         }
     }
+}
+
+# 简单正则抽取 pyproject.toml 里 [project] 的 dependencies 与 [build-system] 的 requires——不引入 TOML
+# 解析器，两个现有组件的写法（单行或多行数组，每项一个带引号的字符串）都是这个形状。负向前瞻是防止
+# 「optional-dependencies」这种以 dependencies 结尾的别的键被误当成主依赖数组。
+function Get-PyProjectDeps {
+    param([string]$PyProjectPath)
+    if (-not (Test-Path -LiteralPath $PyProjectPath)) { return @{ Deps = @(); BuildDeps = @() } }
+    $text = Get-Content -LiteralPath $PyProjectPath -Raw
+    function Get-QuotedArrayAfter($pattern) {
+        $m = [regex]::Match($text, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if (-not $m.Success) { return @() }
+        return ,@([regex]::Matches($m.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+    }
+    $deps = Get-QuotedArrayAfter '(?<![-\w])dependencies\s*=\s*\[(.*?)\]'
+    $buildDeps = Get-QuotedArrayAfter 'requires\s*=\s*\[(.*?)\]'
+    return @{ Deps = $deps; BuildDeps = $buildDeps }
+}
+
+function Find-PipExe {
+    $cmd = Get-Command pip -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Find-PythonExe {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+# 打包离线依赖用：把 wheel 文件（不装、只下）拉到本地目录，供目标机器上 uv 的 --offline + --find-links
+# 用。故意用系统的 pip 而不是 uv——这版 uv（0.11.21）的 `uv pip` 底下没有单独的「只下载不装」子命令；
+# pip download 是这件事的标准做法，跟 uv 装的时候看的是同一套 PyPI/index，wheel 文件本身通用。
+function Invoke-PipDownload {
+    param([string[]]$Specs, [string]$DestDir, [string]$IndexUrl = "")
+    if (-not $Specs -or $Specs.Count -eq 0) { return }
+    New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
+    $extra = @()
+    if ($IndexUrl) { $extra += @("--index-url", $IndexUrl) }
+    $pip = Find-PipExe
+    if ($pip) {
+        & $pip download @Specs -d $DestDir @extra --quiet
+    } else {
+        $py = Find-PythonExe
+        if (-not $py) { throw "打包依赖库要用 pip 下载 wheel 文件——这台机器上找不到 pip 也找不到 python。" }
+        & $py -m pip download @Specs -d $DestDir @extra --quiet
+    }
+    if ($LASTEXITCODE -ne 0) { throw ("下载依赖库失败（pip download 退出码 " + $LASTEXITCODE + "）：" + ($Specs -join ", ")) }
 }
 
 # ── 发现候选组件：根目录下一层 ＋ mcp/ 下一层，凡是有 pyproject.toml + scripts\install.ps1 的 ──
@@ -132,7 +191,13 @@ function Get-ToolboxComponents {
             StreamingChoices  = @()
             OfflineChoices    = @()
             BuildRegisterArgs = { param($Selection) return $null }
+            PyDeps            = @()
+            BuildDeps         = @()
+            GpuTorch          = if ($override -and $override.ContainsKey('GpuTorch')) { $override.GpuTorch } else { $null }
         }
+        $pd = Get-PyProjectDeps -PyProjectPath $pyproj
+        $comp.PyDeps = $pd.Deps
+        $comp.BuildDeps = if (@($pd.BuildDeps).Count -gt 0) { @($pd.BuildDeps) } else { @("setuptools>=68") }
 
         if ($override -and $override.ModelKind -eq "sizes") {
             $comp.ModelKind = "sizes"
@@ -237,6 +302,9 @@ function New-ToolboxBundle {
         [Parameter(Mandatory)][string]$ZipName,
         [switch]$IncludeTests,
         [switch]$KeepStagingDir,
+        # 组件 id -> 是否顺带打包依赖库（离线安装用）。asr-shim 这类有 GpuTorch 表的组件，值是选中的
+        # GPU 变体 key（"cpu"／"nvidia"）；没有 GpuTorch 表的组件，任何非空真值就够（比如 "1"）。
+        [hashtable]$OfflineDeps = @{},
         [scriptblock]$Log = { param($m) Write-Host $m }
     )
 
@@ -262,6 +330,7 @@ function New-ToolboxBundle {
 
     $manifestComponents = @()
     $sizeTotal = 0L
+    $uvBundled = $false   # uv.exe 只需要在 zip 里放一份，供所有带离线依赖的组件共用
 
     foreach ($id in $ComponentIds) {
         $c = $byId[$id]
@@ -313,11 +382,42 @@ function New-ToolboxBundle {
             else { & $Log ("  这个组件没有模型概念（或没找到下载脚本），目标机器只会跑 register（无参）") }
         }
 
+        # 离线依赖：把这个组件的 wheel 也打进去，目标机器装环境这步就不用联网了（模型那部分本来就已经
+        # 能离线——见上面；这里补的是 install.ps1 里 `uv pip install` 那几步）。setup.ps1 只认
+        # 「这个组件目录下有没有 .offline-wheels」，不看 manifest——生成器与重放器各管各的，逻辑不重复。
+        $offlineSel = $OfflineDeps[$id]
+        $hasOfflineDeps = $false
+        if ($offlineSel) {
+            & $Log ("  打包依赖库（离线安装）……")
+            $wheelsDir = Join-Path $destDir ".offline-wheels"
+            $specs = @($c.BuildDeps) + @($c.PyDeps)
+            Invoke-PipDownload -Specs $specs -DestDir $wheelsDir
+            if ($c.GpuTorch -and ($offlineSel -is [string]) -and $c.GpuTorch.ContainsKey($offlineSel)) {
+                $gpu = $c.GpuTorch[$offlineSel]
+                & $Log ("    + PyTorch（" + $gpu.Label + "）……这一步可能要几分钟")
+                Invoke-PipDownload -Specs @("torch") -DestDir $wheelsDir -IndexUrl $gpu.IndexUrl
+            }
+            $wheelCount = @(Get-ChildItem -LiteralPath $wheelsDir -Filter "*.whl" -ErrorAction SilentlyContinue).Count
+            & $Log ("    已下 " + $wheelCount + " 个 wheel（" + (Format-Bytes (Get-DirSize $wheelsDir)) + "）——目标机器装环境这步不用联网了")
+            $hasOfflineDeps = $true
+            if (-not $uvBundled) {
+                $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+                if ($uvCmd) {
+                    $uvDst = Join-Path $stageDir "uv-portable"
+                    New-Item -ItemType Directory -Force -Path $uvDst | Out-Null
+                    Copy-Item -LiteralPath $uvCmd.Source -Destination (Join-Path $uvDst "uv.exe") -Force
+                    & $Log ("  已带上 uv.exe——目标机器不用自己先装 uv")
+                }
+                $uvBundled = $true
+            }
+        }
+
         $destBytes = Get-DirSize $destDir
         $sizeTotal += $destBytes
         $manifestComponents += [ordered]@{
             id = $id; name = $c.Name; module = $c.Module
             models = $bundledModelNames
+            offlineDeps = $hasOfflineDeps
             registerArgs = $registerArgs
             downloadScriptRel = $c.DownloadScriptRel
             bytes = $destBytes
@@ -441,6 +541,12 @@ if (-not (Test-Path -LiteralPath $manifestPath)) {
     exit 1
 }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+# 带了离线依赖的组件会顺带打包 uv.exe（见 uv-portable\），有就优先用它——目标机器不用先自己装 uv。
+$bundledUvExe = Join-Path $root "uv-portable\uv.exe"
+if (Test-Path -LiteralPath $bundledUvExe) {
+    $env:Path = (Split-Path -Parent $bundledUvExe) + ";" + $env:Path
+}
 # 同样的逗号拆分问题（见 package-bundle.ps1 那一处注释），-Only/-Skip 也要拆。
 if ($Only) { $Only = @($Only | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 if ($Skip) { $Skip = @($Skip | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
@@ -484,12 +590,24 @@ foreach ($c in $manifest.components) {
         $failCount++; continue
     }
     $installScript = Join-Path $compDir "scripts\install.ps1"
+    # 带了离线依赖（.offline-wheels\）就让 uv 完全不碰网络——只认本地这份 wheel；install.ps1 本身
+    # 一个字不改，它照样调用裸 `uv`，这两个环境变量是 uv 自己认的开关（uv pip install --help 里
+    # 写着 [env: UV_OFFLINE=] / [env: UV_FIND_LINKS=]）。跑完这一个组件就把两个变量收掉，不连累下一个。
+    $offlineWheels = Join-Path $compDir ".offline-wheels"
+    $usingOffline = Test-Path -LiteralPath $offlineWheels
+    if ($usingOffline) {
+        Write-Host "  带着离线依赖——这步不联网"
+        $env:UV_OFFLINE = "1"
+        $env:UV_FIND_LINKS = $offlineWheels
+    }
     try {
         & $installScript
         if ($LASTEXITCODE -ne 0) { throw ("install.ps1 退出码 " + $LASTEXITCODE) }
     } catch {
         Write-Host ("  装环境这步失败：" + $_.Exception.Message) -ForegroundColor Red
         $failCount++; continue
+    } finally {
+        if ($usingOffline) { Remove-Item Env:\UV_OFFLINE, Env:\UV_FIND_LINKS -ErrorAction SilentlyContinue }
     }
 
     $py = Join-Path $compDir ".venv\Scripts\python.exe"
@@ -585,9 +703,10 @@ function Show-PackagerGui {
     $rows = @{}
     $y = 8
     foreach ($c in $components) {
-        $gbHeight = 46
+        $gbHeight = 46 + 22
         if ($c.ModelKind -eq "sizes" -or $c.ModelKind -eq "generic") { $gbHeight += 22 * [Math]::Max(1, $c.SizeChoices.Count) }
         if ($c.ModelKind -eq "pair") { $gbHeight += 50 }
+        if ($c.GpuTorch) { $gbHeight += 24 }
 
         $gb = New-Object System.Windows.Forms.GroupBox
         $gb.Text = $c.Name + "  [" + $c.Id + "]  ·  源码约 " + (Format-Bytes $c.SourceBytes)
@@ -602,7 +721,7 @@ function Show-PackagerGui {
         $chkInclude.AutoSize = $true
         $gb.Controls.Add($chkInclude)
 
-        $row = @{ Include = $chkInclude; Kind = $c.ModelKind; SizeChecks = @{}; StreamCombo = $null; OfflineCombo = $null }
+        $row = @{ Include = $chkInclude; Kind = $c.ModelKind; SizeChecks = @{}; StreamCombo = $null; OfflineCombo = $null; OfflineDepsChk = $null; GpuCombo = $null }
 
         $my = 44
         if ($c.ModelKind -eq "sizes" -or $c.ModelKind -eq "generic") {
@@ -613,6 +732,7 @@ function Show-PackagerGui {
                 $lbl.Location = New-Object System.Drawing.Point(30, $my)
                 $lbl.AutoSize = $true
                 $gb.Controls.Add($lbl)
+                $my += 22
             } else {
                 foreach ($choice in $c.SizeChoices) {
                     $chk = New-Object System.Windows.Forms.CheckBox
@@ -657,6 +777,7 @@ function Show-PackagerGui {
             $cbO.SelectedIndex = if ($c.OfflineChoices.Count -gt 0) { 1 } else { 0 }
             $gb.Controls.Add($cbO)
             $row.OfflineCombo = $cbO
+            $my += 24
         }
         else {
             $lbl = New-Object System.Windows.Forms.Label
@@ -665,6 +786,35 @@ function Show-PackagerGui {
             $lbl.Location = New-Object System.Drawing.Point(30, $my)
             $lbl.AutoSize = $true
             $gb.Controls.Add($lbl)
+            $my += 22
+        }
+
+        # 133e 风格的独立开关：不管上面模型那部分是哪个分支，$my 到这里都已经落在「下一空行」——
+        # 离线依赖打包与模型选择相互独立（哪怕这次没带模型，也可能只想先把依赖库备好）。
+        $chkOffline = New-Object System.Windows.Forms.CheckBox
+        $chkOffline.Text = "打包依赖库（完全离线安装，装环境这步也不用联网；体积会明显变大）"
+        $chkOffline.Checked = $false
+        $chkOffline.Location = New-Object System.Drawing.Point(12, $my)
+        $chkOffline.AutoSize = $true
+        $gb.Controls.Add($chkOffline)
+        $row.OfflineDepsChk = $chkOffline
+        $my += 22
+        if ($c.GpuTorch) {
+            $lblGpu = New-Object System.Windows.Forms.Label
+            $lblGpu.Text = "打包哪种显卡的 PyTorch："
+            $lblGpu.Location = New-Object System.Drawing.Point(30, $my)
+            $lblGpu.AutoSize = $true
+            $gb.Controls.Add($lblGpu)
+            $cbGpu = New-Object System.Windows.Forms.ComboBox
+            $cbGpu.DropDownStyle = "DropDownList"
+            $cbGpu.Location = New-Object System.Drawing.Point(230, ($my - 3))
+            $cbGpu.Size = New-Object System.Drawing.Size(420, 22)
+            $gpuKeys = @($c.GpuTorch.Keys)
+            foreach ($k in $gpuKeys) { [void]$cbGpu.Items.Add($c.GpuTorch[$k].Label) }
+            $cbGpu.Tag = $gpuKeys
+            $cbGpu.SelectedIndex = 0
+            $gb.Controls.Add($cbGpu)
+            $row.GpuCombo = $cbGpu
         }
 
         $listPanel.Controls.Add($gb)
@@ -750,6 +900,7 @@ function Show-PackagerGui {
     $btnPack.Add_Click({
         $selectedIds = @()
         $modelSel = @{}
+        $offlineDeps = @{}
         foreach ($c in $components) {
             $row = $rows[$c.Id]
             if (-not $row.Include.Checked) { continue }
@@ -762,6 +913,14 @@ function Show-PackagerGui {
                 $streamName = if ($row.StreamCombo.SelectedIndex -gt 0) { $c.StreamingChoices[$row.StreamCombo.SelectedIndex - 1].Name } else { "" }
                 $offlineName = if ($row.OfflineCombo.SelectedIndex -gt 0) { $c.OfflineChoices[$row.OfflineCombo.SelectedIndex - 1].Name } else { "" }
                 $modelSel[$c.Id] = @{ Streaming = $streamName; Offline = $offlineName }
+            }
+            if ($row.OfflineDepsChk -and $row.OfflineDepsChk.Checked) {
+                if ($row.GpuCombo) {
+                    $gpuKeys = $row.GpuCombo.Tag
+                    $offlineDeps[$c.Id] = $gpuKeys[$row.GpuCombo.SelectedIndex]
+                } else {
+                    $offlineDeps[$c.Id] = "1"
+                }
             }
         }
         if ($selectedIds.Count -eq 0) {
@@ -779,7 +938,7 @@ function Show-PackagerGui {
         $btnOpen.Enabled = $false
         try {
             $logCb = { param($m) $logBox.AppendText($m + "`r`n"); $logBox.SelectionStart = $logBox.TextLength; $logBox.ScrollToCaret(); [System.Windows.Forms.Application]::DoEvents() }
-            $result = New-ToolboxBundle -RepoRoot $RepoRoot -ComponentIds $selectedIds -ModelSelection $modelSel `
+            $result = New-ToolboxBundle -RepoRoot $RepoRoot -ComponentIds $selectedIds -ModelSelection $modelSel -OfflineDeps $offlineDeps `
                 -OutputDir $outBox.Text.Trim() -ZipName $nameBox.Text.Trim() `
                 -IncludeTests:$chkTests.Checked -KeepStagingDir:$chkKeep.Checked -Log $logCb
             & $logCb ("`n完成！" + (Format-Bytes $result.ZipBytes) + " —— " + $result.ZipPath)
@@ -824,6 +983,19 @@ function ConvertFrom-ModelsSpec {
     return $out
 }
 
+function ConvertFrom-OfflineDepsSpec {
+    param([string]$Spec)
+    # "asr-shim=nvidia;asr-stream=1" —— 见上面 -OfflineDeps 参数的说明。
+    $out = @{}
+    if (-not $Spec.Trim()) { return $out }
+    foreach ($seg in ($Spec -split ';')) {
+        if (-not $seg.Trim()) { continue }
+        $parts = $seg -split '=', 2
+        if ($parts.Count -eq 2 -and $parts[1].Trim()) { $out[$parts[0].Trim()] = $parts[1].Trim() }
+    }
+    return $out
+}
+
 # 点号源（. .\package-bundle.ps1）时只把上面那些函数带进当前作用域，不自动开窗口也不自动打包
 # （给其它脚本/测试复用 Get-ToolboxComponents 、 New-ToolboxBundle 用）。
 if ($MyInvocation.InvocationName -ne '.') {
@@ -831,7 +1003,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         $od = if ($OutputDir) { $OutputDir } else { Join-Path $Root "dist" }
         $zn = if ($ZipName) { $ZipName } else { "ruyi-toolbox-bundle-" + (Get-Date -Format "yyyyMMdd") }
         $modelSel = ConvertFrom-ModelsSpec -Spec $Models
-        $result = New-ToolboxBundle -RepoRoot $Root -ComponentIds $Components -ModelSelection $modelSel `
+        $offlineDepsSel = ConvertFrom-OfflineDepsSpec -Spec $OfflineDeps
+        $result = New-ToolboxBundle -RepoRoot $Root -ComponentIds $Components -ModelSelection $modelSel -OfflineDeps $offlineDepsSel `
             -OutputDir $od -ZipName $zn -IncludeTests:$IncludeTests -KeepStagingDir:$KeepStagingDir
         Write-Host ("`n完成：" + $result.ZipPath)
         exit 0

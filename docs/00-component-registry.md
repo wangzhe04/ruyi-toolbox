@@ -146,7 +146,8 @@
 ## 6. 打包与迁移（`tools/package-bundle.ps1`，2026-09-21 起）
 
 装好的组件要挪去另一台机器，不用逐个手敲 `install.ps1`／`download-model.ps1`：根目录的
-[`tools/package-bundle.ps1`](../tools/package-bundle.ps1) 能把**选定的组件**（连同已经下好的模型，可选）打成一个
+[`tools/package-bundle.ps1`](../tools/package-bundle.ps1) 能把**选定的组件**（连同已经下好的模型，可选；连同
+装环境要用的 Python 依赖库 wheel，也可选——两者都带上，目标机器整个装起来的过程可以完全不用联网）打成一个
 压缩包；在新机器上解压、双击里面的「安装并接入如意.cmd」，会给每个组件建好虚拟环境、装好依赖，然后：
 带了模型就直接离线登记，没带就跑该组件自己的 `download-model.ps1`（联网下）。用法见
 [`tools/README.md`](../tools/README.md)；本节是**给组件作者**的——你的组件要满足什么，才会被这个工具正确发现、
@@ -215,3 +216,27 @@ packages = ["ruyi_你的组件名"]
   `.pytest_cache` 这类构建产物——目标机器上的虚拟环境永远是 `setup.ps1` 现建的（venv 跨机器不可移植，见
   `tools/README.md` 的说明），不用担心它们被误打包进去。
 - `tests/`、`samples/` 缺省不打包（开发用，不影响组件运行）；真要带上可以在打包器界面勾「包含测试代码」。
+
+### 6.6 想要「打包依赖库 → 目标机器装环境不用联网」，`pyproject.toml` 写对就够（多数组件不用改脚本）
+
+打包器（`Get-PyProjectDeps`）用正则从你的 `pyproject.toml` 里抽 `[project] dependencies` 和
+`[build-system] requires` 两个数组，拿去用 `pip download` 拉 wheel——只要这两个数组是「每项一个带引号的
+字符串」这种平常写法（单行或多行都行），不用改 `package-bundle.ps1`，你的组件就能在 GUI／`-OfflineDeps`
+里被勾选「打包依赖库」。
+
+**例外：装依赖时按 GPU 型号自己挑 index 的包**（比如 asr-shim 的 `install.ps1` 按显卡挑 CPU／CUDA／ROCm
+版 PyTorch，这种包通常不会明写在 `dependencies` 里，`install.ps1` 自己用 `uv pip install torch --index-url
+...` 单独装）——这种要在 `$script:ComponentOverrides` 你组件那条里加一个 `GpuTorch` 表，打包器才知道
+「这个组件除了 `pyproject.toml` 里那些，还要另外按 GPU 变体下一份什么」：
+
+```powershell
+GpuTorch = @{
+    cpu    = @{ Label = "GUI 下拉框里显示的说明"; IndexUrl = "https://download.pytorch.org/whl/cpu" }
+    nvidia = @{ Label = "……"; IndexUrl = "https://download.pytorch.org/whl/cu128" }
+    # 只列你的 install.ps1 真正支持、且走的是「PyPI 兼容 index」而不是写死 wheel 直链的那些变体——
+    # 后者（比如 asr-shim 的 ROCm 分支）没法这样离线打包，见 tools/README.md「已知限制」。
+}
+```
+
+没有 `GpuTorch` 表的组件，GUI 上「打包依赖库」只是个开关；有的话（目前只有 asr-shim）会多一个 GPU 变体
+下拉框，`-OfflineDeps` 对应给 `cpu`／`nvidia` 而不是随便一个非空值。
