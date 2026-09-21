@@ -30,6 +30,8 @@
 - [`docs/00-component-registry.md`](docs/00-component-registry.md) —— 组件怎么向如意登记自己（两仓之间唯一的对接面）
 - [`docs/01-asr-shim-plan.md`](docs/01-asr-shim-plan.md) —— asr-shim 的方案与交办单
 - [`docs/02-asr-stream-plan.md`](docs/02-asr-stream-plan.md) —— asr-stream 的方案（接口与主仓第 130 波对齐）
+- [`docs/03-expansion-roadmap.md`](docs/03-expansion-roadmap.md) —— 下一阶段能力拓展路线图（规划，未实施）：复杂文档、资料库、长音频、批量数据与 TTS
+- [`docs/04-research-and-decisions.md`](docs/04-research-and-decisions.md) —— 官方资料调研、候选对比与选型依据；详细实施和验收方案见路线图导航
 
 ## 约定
 
