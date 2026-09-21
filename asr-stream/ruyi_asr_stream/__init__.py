@@ -8,3 +8,4 @@ __version__ = "0.1.0"
 COMPONENT_ID = "asr-stream"              # 登记文件名与 id（登记约定 §2）
 COMPONENT_NAME_TAG = "ruyi-asr-stream"   # /health 里的 component 字段（如意靠它认出「端口上活着的就是我」）
 DEFAULT_MODEL_NAME = "zipformer-bilingual-zh-en"
+DEFAULT_OFFLINE_MODEL_NAME = "sensevoice-small"   # 131c：离线整句识别（句尾改错，不要显卡）

@@ -20,7 +20,10 @@ param(
     [ValidateSet("github", "hf")]
     [string]$Source = "github",
     [string]$Dest = "",
-    [switch]$NoRegister
+    [switch]$NoRegister,
+    # 131c：一并下载 SenseVoice（离线整句识别，句尾改错不靠显卡，约 230 MB）。不想要就 -NoOffline。
+    [switch]$NoOffline,
+    [string]$OfflineModel = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,15 +91,55 @@ if (-not (Test-Path (Join-Path $Dest "tokens.txt"))) {
 Write-Host ""
 Write-Host ("模型就位：" + $Dest) -ForegroundColor Green
 
+# ── 131c：离线整句识别（SenseVoice）——同一进程多一条 /v1/audio/transcriptions，如意里多一个不要显卡的「整段识别」候选
+$offlineDir = ""
+if (-not $NoOffline) {
+    $offlineDir = Join-Path $modelsDir $OfflineModel
+    Write-Host ""
+    Write-Host ("离线整句识别模型：" + $OfflineModel)
+    if (Test-Path (Join-Path $offlineDir "tokens.txt")) {
+        Write-Host "已经在了，跳过下载。"
+    }
+    elseif ($Source -eq "github") {
+        $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/" + $OfflineModel + ".tar.bz2"
+        $archive = Join-Path $modelsDir ($OfflineModel + ".tar.bz2")
+        Write-Host ("下载：" + $url)
+        & curl.exe -L --fail --retry 3 --retry-delay 2 -o $archive $url
+        if ($LASTEXITCODE -ne 0) { Write-Host "SenseVoice 下载失败，跳过离线整句识别（可稍后 -Source hf 重跑）。" -ForegroundColor Yellow; $offlineDir = "" }
+        else {
+            & tar.exe -xjf $archive -C $modelsDir
+            if ($LASTEXITCODE -ne 0) { Write-Host "SenseVoice 解压失败，跳过。" -ForegroundColor Yellow; $offlineDir = "" }
+            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        }
+    }
+    else {
+        $endpoint = $env:HF_ENDPOINT
+        if ([string]::IsNullOrWhiteSpace($endpoint)) { $endpoint = "https://hf-mirror.com" }
+        $endpoint = $endpoint.TrimEnd("/")
+        New-Item -ItemType Directory -Force -Path $offlineDir | Out-Null
+        foreach ($f in @("tokens.txt", "model.int8.onnx")) {
+            $url = $endpoint + "/csukuangfj/" + $OfflineModel + "/resolve/main/" + $f
+            Write-Host ("下载：" + $f)
+            & curl.exe -L --fail --retry 3 --retry-delay 2 -o (Join-Path $offlineDir ($f + ".part")) $url
+            if ($LASTEXITCODE -ne 0) { Write-Host ("SenseVoice 下载失败：" + $f + "，跳过离线整句识别。") -ForegroundColor Yellow; $offlineDir = ""; break }
+            Move-Item -Force (Join-Path $offlineDir ($f + ".part")) (Join-Path $offlineDir $f)
+        }
+    }
+    if ($offlineDir -and -not (Test-Path (Join-Path $offlineDir "tokens.txt"))) { $offlineDir = "" }
+    if ($offlineDir) { Write-Host ("离线模型就位：" + $offlineDir) -ForegroundColor Green }
+}
+
 if ($NoRegister) {
     Write-Host "-NoRegister：跳过登记。要让如意自动接入，手动跑："
-    Write-Host ("  " + $py + " -m ruyi_asr_stream register --model-dir """ + $Dest + """")
+    if ($offlineDir) { Write-Host ("  " + $py + " -m ruyi_asr_stream register --model-dir """ + $Dest + """ --offline-model-dir """ + $offlineDir + """") }
+    else { Write-Host ("  " + $py + " -m ruyi_asr_stream register --model-dir """ + $Dest + """") }
     exit 0
 }
 
 Write-Host ""
 Write-Host "==> 向如意登记本组件" -ForegroundColor Cyan
-& $py -m ruyi_asr_stream register --model-dir $Dest
+if ($offlineDir) { & $py -m ruyi_asr_stream register --model-dir $Dest --offline-model-dir $offlineDir }
+else { & $py -m ruyi_asr_stream register --model-dir $Dest }
 if ($LASTEXITCODE -ne 0) {
     Write-Host "登记没成（见上面的原因）。服务本身仍然可以手动起：scripts\start.ps1" -ForegroundColor Yellow
     exit $LASTEXITCODE

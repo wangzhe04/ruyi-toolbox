@@ -55,6 +55,8 @@ class Settings:
         ap.add_argument("--port", type=int, default=_env_int(env, "RUYI_ASR_PORT", DEFAULT_PORT))
         ap.add_argument("--model", default=env.get("RUYI_ASR_MODEL", "qwen3-asr-0.6b").strip())
         ap.add_argument("--model-dir", default=env.get("RUYI_ASR_MODEL_DIR", "").strip())
+        # 「auto」：models 目录里有几份就按显存挑最大能装下的（autopick.py）；此时 --model-dir 不用给
+        ap.add_argument("--models-root", default=env.get("RUYI_ASR_MODELS_ROOT", "").strip())
         ap.add_argument(
             "--idle-unload-sec",
             type=int,
@@ -67,9 +69,13 @@ class Settings:
         ns = ap.parse_args([] if argv is None else argv)
 
         self.port: int = int(ns.port)
-        self.model_name: str = ns.model or "qwen3-asr-0.6b"
-        self.model_repo: str = MODEL_ALIASES.get(self.model_name.lower(), self.model_name)
-        self.model_dir: str = ns.model_dir
+        from .autopick import AUTO_MODEL_NAME, is_auto  # noqa: PLC0415
+
+        self.auto: bool = is_auto(ns.model)
+        self.model_name: str = AUTO_MODEL_NAME if self.auto else (ns.model or "qwen3-asr-0.6b")
+        self.model_repo: str = "" if self.auto else MODEL_ALIASES.get(self.model_name.lower(), self.model_name)
+        self.model_dir: str = "" if self.auto else ns.model_dir
+        self.models_root: str = ns.models_root
         self.idle_unload_sec: int = max(0, int(ns.idle_unload_sec))
         self.device: str = ns.device
         self.dtype: str = ns.dtype
@@ -211,6 +217,8 @@ class ShimHandler(BaseHTTPRequestHandler):
                 "component": COMPONENT_NAME_TAG,
                 "version": __version__,
                 "model": self.settings.model_name,
+                # auto 模式下加载后才知道挑了哪份；没加载或非 auto 就是 model 本身
+                "resolvedModel": st.get("model") or self.settings.model_name,
                 "loaded": st["loaded"],
                 "device": st["device"],
                 "idleUnloadSec": self.settings.idle_unload_sec,
@@ -473,6 +481,7 @@ def serve(settings: Settings | None = None) -> int:
             model_dir=settings.model_dir,
             device=settings.device,
             dtype=settings.dtype,
+            models_root=settings.models_root if settings.auto else "",
         ),
         idle_unload_sec=settings.idle_unload_sec,
     )
@@ -491,9 +500,13 @@ def serve(settings: Settings | None = None) -> int:
         return 2
 
     LOG.info("ruyi-asr-shim %s 已监听 http://127.0.0.1:%d", __version__, settings.port)
-    LOG.info("模型：%s（仓库 %s），懒加载，空闲 %d 秒卸载%s",
-             settings.model_name, settings.model_repo, settings.idle_unload_sec,
-             "（0 = 常驻）" if settings.idle_unload_sec == 0 else "")
+    if settings.auto:
+        LOG.info("模型：auto（models 目录 %s；第一发请求时按空闲显存挑最大能装下的），空闲 %d 秒卸载%s",
+                 settings.models_root or "-", settings.idle_unload_sec, "（0 = 常驻）" if settings.idle_unload_sec == 0 else "")
+    else:
+        LOG.info("模型：%s（仓库 %s），懒加载，空闲 %d 秒卸载%s",
+                 settings.model_name, settings.model_repo, settings.idle_unload_sec,
+                 "（0 = 常驻）" if settings.idle_unload_sec == 0 else "")
     # 这里【故意不】去问 torch 有没有 CUDA：组件登记约定 §2.2 要求空转要轻，
     # 没收到第一发转写请求之前不许 import torch/transformers。设备会在首次加载时打印。
     LOG.info("推理设备在第一发转写请求时决定（有 CUDA 就用 CUDA，没有就 CPU）。"

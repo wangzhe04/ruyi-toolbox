@@ -76,6 +76,8 @@
      （`asrStreamProviderId`／`asrStreamModel`）。接口是「有会话的 HTTP」而不是 WebSocket，见 `docs/02-asr-stream-plan.md` §2：
      `POST {basePath}/stream/sessions` → `{id}`；`POST …/sessions/{id}/audio`（16 kHz PCM16LE，单块 ≤ 1 MB）→
      `{partial, finals:[{text,startMs,endMs}]}`；`POST …/finish`；`DELETE …/{id}`。`protocol` 字段不用。
+   - **一个组件可以同时提供多种**（2026-09-21，131c）：`asr-stream` 组件配了 SenseVoice 后 `provides` 里同时有 `asr-stream` 与 `asr`，
+     如意生成**一个**服务商条目、两个带不同标记的模型；两对配置键各自按上面的规则自动选中。
    - 以后会加 `tts`、`embedding`、`ocr` 等；不认识的 `type` 如意直接跳过（向前兼容），所以组件可以先登记、如意后支持。
 
 服务类组件必须守的行为：

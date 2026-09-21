@@ -60,3 +60,11 @@
 
 `tests/`：假识别器（可注入）—— 会话生命周期、分块/奇数字节/超限、端点收口、finish 收尾、429、热词入参、Host/Origin 闸、看门狗。
 不载真模型、不联网。真机冒烟另有脚本：一段 5 s 合成语音按 250 ms 送，断言 partial 非空且 final 文本正确。
+
+## 8. 131 波补记（2026-09-21，主仓 52 号文）
+
+- **131a**：解码缺省改 `modified_beam_search(4)`（`RUYI_ASR_STREAM_DECODING` 可回 greedy）。评测 hard 档错字 6.78→5.92，每块耗时不变；热词从此不依赖「有没有热词文件」。
+- **131c**：同一进程再载一个离线识别器（SenseVoice-small int8，CPU），开 `POST /v1/audio/transcriptions`（OpenAI 形 multipart，只认 WAV）与 `GET /v1/models`；
+  登记 `provides` 同时有 `asr-stream` 与 `asr`（`protocol: transcriptions`，模型名 `sensevoice-small`）。`download-model.ps1` 缺省一并下载并登记；`-NoOffline` 跳过。
+  离线模型坏了不拖死流式那条路：记一行、照常起、端点回 409。评测：一句 4.5 s 音频 0.25 s，错字率 0.72/0.87/2.74（clean/noisy/hard），接近 Qwen3-ASR-0.6B。
+- 不做：换第一遍模型（纯中文 2025 模型对夹英文术语的话更差；Paraformer 12/40 丢尾字）、热词默认开（没用）。

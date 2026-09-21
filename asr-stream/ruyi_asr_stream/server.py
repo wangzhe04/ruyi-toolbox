@@ -6,6 +6,9 @@
   POST   /v1/stream/sessions/{id}/audio   喂一块 16 kHz PCM16LE（≤ 1 MB）→ {partial, finals}
   POST   /v1/stream/sessions/{id}/finish  冲尾巴、关会话 → {finals}
   DELETE /v1/stream/sessions/{id}         关会话 → 204
+  GET    /v1/models                       列出本进程提供的模型（流式一个，配了离线再加一个）
+  POST   /v1/audio/transcriptions         131c：离线整句识别（SenseVoice，OpenAI 形 multipart，只认 WAV）
+                                          没配离线模型 → 409 offline_not_configured
 
 安全闸与 asr-shim 一字不差：只绑 127.0.0.1；Host 必须是 127.0.0.1:<port>/localhost:<port>；带 Origin 一律 403；不回 CORS 头。
 日志只记元数据：会话数、字节数、耗时、文本长度 —— 不记文本。
@@ -23,8 +26,10 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import COMPONENT_NAME_TAG, DEFAULT_MODEL_NAME, __version__
-from .engine import SessionLimit, SessionManager, UnknownSession
+from . import COMPONENT_NAME_TAG, DEFAULT_MODEL_NAME, DEFAULT_OFFLINE_MODEL_NAME, __version__
+from .audio import UnsupportedAudioError, decode_wav_to_mono16k
+from .engine import OfflineTranscriber, SessionLimit, SessionManager, UnknownSession
+from .multipart import MultipartError, boundary_from_content_type, field_value, find_part, parse_multipart
 from .watchdog import watchdog_from_env
 
 LOG = logging.getLogger("ruyi_asr_stream")
@@ -33,6 +38,8 @@ BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
 MAX_CHUNK_BYTES = 1024 * 1024          # 单块 ≤ 1 MB（32 s 音频；正常是 250 ms = 8 KB）
 MAX_JSON_BYTES = 64 * 1024
+MAX_AUDIO_BYTES = 25 * 1024 * 1024     # 离线整句识别的 multipart 上限（与 asr-shim、如意的 25 MB 同口径）
+MAX_FIELD = 4096
 SESSION_RE = re.compile(r"^/v1/stream/sessions/([0-9a-f]{32})(?:/(audio|finish))?$")
 
 
@@ -53,10 +60,20 @@ class Settings:
         ap.add_argument("--max-sessions", type=int, default=_env_int(env, "RUYI_ASR_STREAM_MAX_SESSIONS", 4))
         ap.add_argument("--idle-sec", type=float, default=_env_float(env, "RUYI_ASR_STREAM_IDLE_SEC", 30.0))
         ap.add_argument("--log-level", default=env.get("RUYI_ASR_STREAM_LOG_LEVEL", "INFO").strip() or "INFO")
+        # 131a：解码方式，缺省 modified_beam_search（见 engine.normalize_decoding）
+        ap.add_argument("--decoding", default=env.get("RUYI_ASR_STREAM_DECODING", "").strip())
+        # 131c：离线整句识别（SenseVoice）。不给目录 = 不开这条路（/v1/audio/transcriptions 回 409）
+        ap.add_argument("--offline-model-dir", default=env.get("RUYI_ASR_STREAM_OFFLINE_MODEL_DIR", "").strip())
+        ap.add_argument("--offline-model", default=env.get("RUYI_ASR_STREAM_OFFLINE_MODEL", "").strip() or DEFAULT_OFFLINE_MODEL_NAME)
+        ap.add_argument("--offline-threads", type=int, default=_env_int(env, "RUYI_ASR_STREAM_OFFLINE_THREADS", 2))
         ns = ap.parse_args([] if argv is None else argv)
         self.port = int(ns.port)
         self.model_dir = ns.model_dir
         self.model_name = ns.model
+        self.decoding = ns.decoding
+        self.offline_model_dir = ns.offline_model_dir
+        self.offline_model_name = ns.offline_model
+        self.offline_threads = max(1, int(ns.offline_threads))
         self.threads = max(1, int(ns.threads))
         self.rule1_sec = float(ns.rule1_sec)
         self.rule2_sec = float(ns.rule2_sec)
@@ -94,6 +111,7 @@ class StreamHandler(BaseHTTPRequestHandler):
 
     settings: Settings
     manager: SessionManager
+    offline: OfflineTranscriber | None = None
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         LOG.debug("http %s", fmt % args)
@@ -178,9 +196,12 @@ class StreamHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if not self._gate():
             return
-        if self._path() == "/health":
+        path = self._path()
+        if path == "/health":
             return self._health()
-        return self._fail(404, "not_found", "没有这条路径。本服务只有 /health 与 /v1/stream/sessions…。")
+        if path == "/v1/models":
+            return self._models()
+        return self._fail(404, "not_found", "没有这条路径。本服务只有 /health、/v1/models、/v1/stream/sessions… 与 /v1/audio/transcriptions。")
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._gate():
@@ -193,9 +214,11 @@ class StreamHandler(BaseHTTPRequestHandler):
             return self._audio(m.group(1))
         if m and m.group(2) == "finish":
             return self._finish(m.group(1))
-        if path == "/health":
+        if path == "/v1/audio/transcriptions":
+            return self._transcriptions()
+        if path in ("/health", "/v1/models"):
             return self._fail(405, "method_not_allowed", "该端点只接受 GET。", close=True)
-        return self._fail(404, "not_found", "没有这条路径。本服务只有 /health 与 /v1/stream/sessions…。", close=True)
+        return self._fail(404, "not_found", "没有这条路径。本服务只有 /health、/v1/models、/v1/stream/sessions… 与 /v1/audio/transcriptions。", close=True)
 
     def do_DELETE(self) -> None:  # noqa: N802
         if not self._gate():
@@ -231,7 +254,72 @@ class StreamHandler(BaseHTTPRequestHandler):
             "sessions": self.manager.count(),
             "model": self.settings.model_name,
             "backend": getattr(self.manager.backend, "name", "?"),
+            "decoding": getattr(self.manager.backend, "decoding", "?"),
+            # 131c：离线整句识别有没有配。null = 没配；配了就报模型名与已处理句数（不记文本）。
+            "offline": ({"model": self.offline.model_name, "backend": getattr(self.offline.backend, "name", "?"), "count": self.offline.count}
+                        if self.offline is not None else None),
         })
+
+    def _models(self) -> None:
+        data = [{"id": self.settings.model_name, "object": "model", "created": 0, "owned_by": COMPONENT_NAME_TAG, "capabilities": ["asr-stream"]}]
+        if self.offline is not None:
+            data.append({"id": self.offline.model_name, "object": "model", "created": 0, "owned_by": COMPONENT_NAME_TAG, "capabilities": ["asr"]})
+        self._send(200, {"object": "list", "data": data})
+
+    def _transcriptions(self) -> None:
+        """131c：OpenAI 形 /v1/audio/transcriptions（multipart：file 必填，model / response_format 可选）。只认 WAV。"""
+        if self.offline is None:
+            return self._fail(409, "offline_not_configured",
+                              "本组件没配离线整句识别模型。跑 scripts\\download-model.ps1（缺省会一并下载 SenseVoice）再登记一次。")
+        ctype = str(self.headers.get("Content-Type") or "")
+        if ctype.split(";")[0].strip().lower() != "multipart/form-data":
+            return self._fail(415, "unsupported_media_type", "本端点只接受 multipart/form-data（OpenAI /v1/audio/transcriptions 形）。")
+        body = self._read_body(MAX_AUDIO_BYTES)
+        if body is None:
+            return
+        try:
+            parts = parse_multipart(body, boundary_from_content_type(ctype))
+        except MultipartError as exc:
+            return self._fail(400, "bad_request", "multipart 解析失败：" + _short(exc))
+        file_part = find_part(parts, "file")
+        if file_part is None:
+            return self._fail(400, "bad_request", "缺少 file 字段（OpenAI 形的音频文件段）。")
+        if not file_part.data:
+            return self._fail(400, "bad_request", "file 段是空的。")
+        response_format = (field_value(parts, "response_format", 64).strip() or "json").lower()
+        if response_format not in ("json", "verbose_json", "text"):
+            return self._fail(400, "bad_request", "response_format 只支持 json / verbose_json / text。")
+        try:
+            pcm = decode_wav_to_mono16k(file_part.data)
+        except UnsupportedAudioError as exc:
+            LOG.info("offline reject: unsupported audio bytes=%d", len(file_part.data))
+            return self._fail(415, "unsupported_media_type", str(exc))
+        try:
+            out = self.offline.transcribe(pcm.samples)
+        except Exception as exc:  # noqa: BLE001 - 解码异常不该带垮服务
+            LOG.exception("offline transcribe failed")
+            return self._fail(500, "decode_failed", "识别出错：%s" % _short(exc))
+        text = str(out.get("text") or "")
+        if response_format == "text":
+            raw = text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+            return
+        payload: dict = {"text": text}
+        if out.get("language"):
+            payload["language"] = out["language"]
+        if response_format == "verbose_json":
+            payload["task"] = "transcribe"
+            payload["duration"] = round(pcm.duration_sec, 3)
+            payload["segments"] = []
+        self._send(200, payload)
 
     def _open(self) -> None:
         body = self._read_body(MAX_JSON_BYTES)
@@ -303,8 +391,8 @@ class StreamServer(ThreadingHTTPServer):
             raise RuntimeError("拒绝在非 127.0.0.1 的地址上监听：" + str(host))
 
 
-def build_server(settings: Settings, manager: SessionManager) -> StreamServer:
-    handler = type("BoundStreamHandler", (StreamHandler,), {"settings": settings, "manager": manager})
+def build_server(settings: Settings, manager: SessionManager, offline: OfflineTranscriber | None = None) -> StreamServer:
+    handler = type("BoundStreamHandler", (StreamHandler,), {"settings": settings, "manager": manager, "offline": offline})
     return StreamServer(settings.port, handler)
 
 
@@ -314,11 +402,21 @@ def make_manager(settings: Settings) -> SessionManager:
     backend = SherpaBackend(
         settings.model_dir, num_threads=settings.threads, rule1_sec=settings.rule1_sec,
         rule2_sec=settings.rule2_sec, rule3_sec=settings.rule3_sec, hotwords_file=settings.hotwords_file,
+        decoding=settings.decoding,
     )
     return SessionManager(backend, max_sessions=settings.max_sessions, idle_sec=settings.idle_sec)
 
 
-def serve(settings: Settings | None = None, manager: SessionManager | None = None) -> int:
+def make_offline(settings: Settings) -> OfflineTranscriber | None:
+    if not settings.offline_model_dir:
+        return None
+    from .engine import SenseVoiceBackend  # noqa: PLC0415
+
+    backend = SenseVoiceBackend(settings.offline_model_dir, num_threads=settings.offline_threads, model_name=settings.offline_model_name)
+    return OfflineTranscriber(backend)
+
+
+def serve(settings: Settings | None = None, manager: SessionManager | None = None, offline: OfflineTranscriber | None = None) -> int:
     settings = settings or Settings()
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
@@ -332,16 +430,28 @@ def serve(settings: Settings | None = None, manager: SessionManager | None = Non
             print("ruyi-asr-stream 起不来：模型加载失败（%s）。\n  模型目录：%s\n  先跑 scripts\\download-model.ps1。"
                   % (_short(exc), settings.model_dir), file=sys.stderr)
             return 3
+    if offline is None and settings.offline_model_dir:
+        # 离线模型坏了不该把流式那条路一起拖死：记一行、照常起，/v1/audio/transcriptions 回 409。
+        try:
+            offline = make_offline(settings)
+        except Exception as exc:  # noqa: BLE001
+            LOG.error("离线整句识别模型加载失败（%s），本次不开这条路。目录：%s", _short(exc), settings.offline_model_dir)
+            offline = None
     try:
-        httpd = build_server(settings, manager)
+        httpd = build_server(settings, manager, offline)
     except OSError as exc:
         print("ruyi-asr-stream 起不来：127.0.0.1:%d 这个端口用不了（%s）。\n"
               "  端口被别的程序占了就换一个：设 RUYI_ASR_STREAM_PORT=<别的端口>，或加 --port。\n"
               "  如意会自己挑空闲端口并经 RUYI_ASR_STREAM_PORT 告诉本服务。" % (settings.port, exc), file=sys.stderr)
         return 2
     LOG.info("ruyi-asr-stream %s 已监听 http://127.0.0.1:%d", __version__, settings.port)
-    LOG.info("模型：%s（%s），启动即加载、常驻；端点规则 rule1=%.1fs rule2=%.1fs rule3=%.0fs；线程 %d",
-             settings.model_name, settings.model_dir or "-", settings.rule1_sec, settings.rule2_sec, settings.rule3_sec, settings.threads)
+    LOG.info("模型：%s（%s），启动即加载、常驻；解码 %s；端点规则 rule1=%.1fs rule2=%.1fs rule3=%.0fs；线程 %d",
+             settings.model_name, settings.model_dir or "-", getattr(manager.backend, "decoding", "?"),
+             settings.rule1_sec, settings.rule2_sec, settings.rule3_sec, settings.threads)
+    if offline is not None:
+        LOG.info("离线整句识别：%s（%s），/v1/audio/transcriptions 已开", offline.model_name, settings.offline_model_dir)
+    else:
+        LOG.info("离线整句识别：未配（/v1/audio/transcriptions 回 409）。想要句尾改错不靠显卡：download-model.ps1 缺省会下 SenseVoice")
 
     watchdog = watchdog_from_env(lambda: _stop_async(httpd))
     if watchdog is not None:
@@ -405,6 +515,18 @@ def doctor() -> int:
     else:
         print("模型目录: 没设 RUYI_ASR_STREAM_MODEL_DIR。跑 scripts/download-model.ps1。")
         ok = False
+    offline_dir = os.environ.get("RUYI_ASR_STREAM_OFFLINE_MODEL_DIR", "").strip()
+    if offline_dir:
+        try:
+            from .engine import resolve_offline_model_files  # noqa: PLC0415
+
+            f = resolve_offline_model_files(offline_dir)
+            print("离线整句识别: %s (%.0f MB)" % (f["model"], os.path.getsize(f["model"]) / 1e6))
+        except FileNotFoundError as exc:
+            print("离线整句识别: %s" % exc)
+            ok = False
+    else:
+        print("离线整句识别: 没设 RUYI_ASR_STREAM_OFFLINE_MODEL_DIR（可选；没有它就没有不靠显卡的句尾改错）。")
     from .registry import registration_path  # noqa: PLC0415
 
     rp = registration_path()

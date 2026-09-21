@@ -35,9 +35,12 @@ WINDOW_MARGIN_SEC = 2.0  # 留点余量，别顶着上限喂
 
 class Qwen3AsrBackend:
     def __init__(self, model_repo: str, model_dir: str = "", device: str = "auto",
-                 dtype: str = "auto"):
+                 dtype: str = "auto", models_root: str = ""):
         self.model_repo = model_repo
         self.model_dir = (model_dir or "").strip()
+        # auto 模式：给 models_root、不给 model_dir；load() 里探完设备再按空闲显存挑（autopick.py）
+        self.models_root = (models_root or "").strip()
+        self.resolved_model = "" if self.models_root else _name_of(model_repo)
         self.device_pref = (device or "auto").strip().lower() or "auto"
         self.dtype_pref = (dtype or "auto").strip().lower() or "auto"
         self.device = "unknown"
@@ -70,6 +73,18 @@ class Qwen3AsrBackend:
         # AMD 的 ROCm 构建就落在第一档（torch.cuda），不需要在这里分叉 —— 见 devices.py 的头注。
         choice = select_device(self.device_pref, build_probes(torch, self.dtype_pref))
         self._choice = choice
+
+        if self.models_root:
+            from .autopick import free_vram_mb, pick  # noqa: PLC0415
+
+            free_mb = free_vram_mb(torch) if choice.device == "cuda" else None
+            cand, why = pick(self.models_root, free_mb)
+            if cand is None:
+                raise FileNotFoundError(why + "（先跑 scripts/download-model.ps1）")
+            self.model_dir = os.path.join(self.models_root, cand.dirname)
+            self.model_repo = cand.repo
+            self.resolved_model = cand.name
+            LOG.info("自动选模型：%s —— %s", cand.name, why)
 
         from transformers import AutoProcessor  # noqa: PLC0415
 
@@ -262,6 +277,14 @@ def _split_raw(raw: str) -> tuple[str, str]:
     for tok in ("<|im_end|>", "<|endoftext|>", "</s>"):
         text = text.replace(tok, "")
     return text.strip(), lang.strip()[:40]
+
+
+def _name_of(model_repo: str) -> str:
+    """仓库名 → 如意里的模型名（Qwen/Qwen3-ASR-1.7B-hf → qwen3-asr-1.7b）；认不出就原样。"""
+    leaf = str(model_repo or "").rstrip("/").split("/")[-1]
+    if leaf.lower().endswith("-hf"):
+        leaf = leaf[:-3]
+    return leaf.lower()
 
 
 def _window_seconds(processor) -> float:

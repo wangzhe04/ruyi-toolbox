@@ -54,6 +54,7 @@ class EngineManager:
         self._load_count = 0
         self._unload_count = 0
         self._device = "unknown"
+        self._model = ""                        # auto 模式下加载后才知道挑了哪份
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
 
@@ -64,6 +65,7 @@ class EngineManager:
             return {
                 "loaded": self._backend is not None,
                 "device": self._device,
+                "model": self._model,
                 "loadCount": self._load_count,
                 "unloadCount": self._unload_count,
                 "idleUnloadSec": self._idle_sec,
@@ -125,8 +127,9 @@ class EngineManager:
             self._backend = backend
             self._load_count += 1
             self._device = getattr(backend, "device", "unknown")
+            self._model = str(getattr(backend, "resolved_model", "") or "")
             self._last_used = self._clock()
-        LOG.info("模型已加载 device=%s load_ms=%d", self._device, int((self._clock() - t0) * 1000))
+        LOG.info("模型已加载 device=%s model=%s load_ms=%d", self._device, self._model or "-", int((self._clock() - t0) * 1000))
         self._start_reaper()
         return backend
 
@@ -203,8 +206,8 @@ class EngineManager:
 # 具体加载与调用形状见 asr-shim/docs/backend-notes.md（含查证来源与日期）。
 
 def make_backend(model_repo: str, model_dir: str = "", device: str = "auto",
-                 dtype: str = "auto") -> Backend:
+                 dtype: str = "auto", models_root: str = "") -> Backend:
     from .qwen_backend import Qwen3AsrBackend
 
     return Qwen3AsrBackend(model_repo=model_repo, model_dir=model_dir,
-                           device=device, dtype=dtype)
+                           device=device, dtype=dtype, models_root=models_root)

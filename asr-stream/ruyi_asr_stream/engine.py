@@ -214,6 +214,18 @@ def pcm16_to_float32(pcm16: bytes) -> np.ndarray:
 # ── 真后端：sherpa-onnx 流式 transducer ───────────────────────────────────────
 
 ENCODER_PATTERNS = ("encoder", )
+DEFAULT_DECODING = "modified_beam_search"
+DECODINGS = ("greedy_search", "modified_beam_search")
+
+
+def normalize_decoding(name: str) -> str:
+    s = str(name or "").strip().lower().replace("-", "_")
+    if s in ("", "auto", "beam", "beam_search", "modified_beam_search"):
+        return "modified_beam_search"
+    if s in ("greedy", "greedy_search"):
+        return "greedy_search"
+    LOG.warning("看不懂的 decoding=%r，按 %s 处理（可选：%s）", name, DEFAULT_DECODING, "/".join(DECODINGS))
+    return DEFAULT_DECODING
 
 
 def resolve_model_files(model_dir: str) -> dict:
@@ -248,22 +260,27 @@ class SherpaBackend:
     name = "sherpa-onnx"
 
     def __init__(self, model_dir: str, *, num_threads: int = 2, rule1_sec: float = 2.0, rule2_sec: float = 0.8,
-                 rule3_sec: float = 20.0, hotwords_file: str = "", hotwords_score: float = 1.5, provider: str = "cpu"):
+                 rule3_sec: float = 20.0, hotwords_file: str = "", hotwords_score: float = 1.5, provider: str = "cpu",
+                 decoding: str = "", max_active_paths: int = 4):
         import sherpa_onnx  # noqa: PLC0415
 
         files = resolve_model_files(model_dir)
         self.files = files
         self.hotwords_enabled = bool(hotwords_file)
-        # 有热词才用 modified_beam_search（贵一点）；没有就 greedy（最快）。会话级热词也要 beam search，
-        # 所以只要【可能】用热词就得在构造时选 beam search —— 这里按「给了热词文件」判；会话热词见 create_stream。
-        decoding = "modified_beam_search" if hotwords_file else "greedy_search"
+        # 131a（52 号文 §2）：缺省 modified_beam_search(4)。评测里它比 greedy 在嘈杂条件下少 13% 的错字
+        # （hard 6.78→5.92），每块解码耗时不变（18.8 vs 19.8 ms）；而且只有 beam search 才能用热词，
+        # 所以会话级热词从此不用再看「有没有热词文件」。想回 greedy：RUYI_ASR_STREAM_DECODING=greedy_search
+        # （给了热词文件时仍强制 beam search，否则热词根本不起作用）。
+        decoding = normalize_decoding(decoding)
+        if hotwords_file and decoding != "modified_beam_search":
+            decoding = "modified_beam_search"
         kwargs = dict(
             tokens=files["tokens"], encoder=files["encoder"], decoder=files["decoder"], joiner=files["joiner"],
             num_threads=max(1, int(num_threads)), sample_rate=SAMPLE_RATE, feature_dim=80,
             enable_endpoint_detection=True,
             rule1_min_trailing_silence=float(rule1_sec), rule2_min_trailing_silence=float(rule2_sec),
             rule3_min_utterance_length=float(rule3_sec),
-            decoding_method=decoding, provider=provider,
+            decoding_method=decoding, max_active_paths=max(1, int(max_active_paths)), provider=provider,
         )
         if hotwords_file:
             kwargs["hotwords_file"] = hotwords_file
@@ -303,3 +320,79 @@ class SherpaBackend:
 def _result_text(result) -> str:
     text = getattr(result, "text", result)
     return str(text or "").strip()
+
+
+# ── 131c（52 号文 §4）：离线整句识别（SenseVoice）—— 不要显卡的「第二遍」 ─────────────────────
+#
+# 流式小模型管「立刻出字」，句尾改错需要一个更准的整句模型。SenseVoice-small int8（sherpa-onnx，230 MB，CPU）
+# 评测里一句 4.5 s 音频 0.25 s、错字率接近 Qwen3-ASR-0.6B —— 于是同一个进程再载一个离线识别器、多开一条
+# OpenAI 形的 /v1/audio/transcriptions，登记时同时 provides `asr`。没有显卡的机器也能有「句尾自动改错」。
+# 与流式解码各用各的锁：一句 250 ms 的整句解码不该把正在出字的那条流卡住。
+
+class OfflineBackend(Protocol):
+    name: str
+    model_name: str
+
+    def transcribe(self, samples: np.ndarray) -> tuple[str, str]: ...   # (text, language)
+
+
+def resolve_offline_model_files(model_dir: str) -> dict:
+    """SenseVoice 目录：tokens.txt + model(.int8).onnx，优先 int8。"""
+    if not model_dir or not os.path.isdir(model_dir):
+        raise FileNotFoundError("离线模型目录不存在：%r" % model_dir)
+    names = sorted(os.listdir(model_dir))
+    tokens = os.path.join(model_dir, "tokens.txt")
+    if not os.path.isfile(tokens):
+        raise FileNotFoundError("离线模型目录里没有 tokens.txt：%s" % model_dir)
+    cands = [n for n in names if n.startswith("model") and n.endswith(".onnx")]
+    if not cands:
+        raise FileNotFoundError("离线模型目录里没有 model*.onnx：%s" % model_dir)
+    int8 = [n for n in cands if ".int8." in n]
+    return {"tokens": tokens, "model": os.path.join(model_dir, (int8 or cands)[0])}
+
+
+class SenseVoiceBackend:
+    name = "sense-voice"
+
+    def __init__(self, model_dir: str, *, num_threads: int = 2, model_name: str = "sensevoice-small", provider: str = "cpu"):
+        import sherpa_onnx  # noqa: PLC0415
+
+        files = resolve_offline_model_files(model_dir)
+        self.files = files
+        self.model_name = model_name
+        # use_itn=True：数字、日期规整成阿拉伯数字（「三点」→「3点」），与 Qwen3-ASR 的输出习惯一致。
+        self.recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=files["model"], tokens=files["tokens"], num_threads=max(1, int(num_threads)),
+            use_itn=True, language="auto", provider=provider,
+        )
+
+    def transcribe(self, samples: np.ndarray) -> tuple[str, str]:
+        s = self.recognizer.create_stream()
+        s.accept_waveform(SAMPLE_RATE, np.ascontiguousarray(samples, dtype=np.float32))
+        self.recognizer.decode_stream(s)
+        r = s.result
+        text = str(getattr(r, "text", r) or "").strip()
+        lang = str(getattr(r, "lang", "") or "").strip().strip("<|>")
+        return text, lang
+
+
+class OfflineTranscriber:
+    """离线识别器的薄壳：一把自己的锁（串行）、只记元数据。"""
+
+    def __init__(self, backend: OfflineBackend):
+        self.backend = backend
+        self._lock = threading.Lock()
+        self.count = 0
+
+    @property
+    def model_name(self) -> str:
+        return str(getattr(self.backend, "model_name", "") or "")
+
+    def transcribe(self, samples: np.ndarray) -> dict:
+        t0 = time.perf_counter()
+        with self._lock:
+            text, lang = self.backend.transcribe(samples)
+            self.count += 1
+        LOG.info("offline ok audio_s=%.2f dur_ms=%.0f text_len=%d lang=%s",
+                 samples.size / SAMPLE_RATE, (time.perf_counter() - t0) * 1000, len(text), lang or "-")
+        return {"text": text, "language": lang}

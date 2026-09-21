@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import COMPONENT_ID, COMPONENT_NAME_TAG, DEFAULT_MODEL_NAME, __version__
+from . import COMPONENT_ID, COMPONENT_NAME_TAG, DEFAULT_MODEL_NAME, DEFAULT_OFFLINE_MODEL_NAME, __version__
 
 SCHEMA = 1
 DISPLAY_NAME = "本地实时语音识别（流式，sherpa-onnx）"
@@ -39,8 +39,19 @@ class CheckResult:
         self.ok = not problems
 
 
-def self_check(python_exe: str, cwd: str, model_dir: str) -> CheckResult:
+def self_check(python_exe: str, cwd: str, model_dir: str, offline_model_dir: str = "") -> CheckResult:
     problems: list[str] = []
+    # 131c：离线模型目录是可选的；给了就必须是对的（登记文件存在 = 如意会去执行它）。
+    if offline_model_dir:
+        if not os.path.isabs(offline_model_dir):
+            problems.append("离线模型目录不是绝对路径：%r" % offline_model_dir)
+        else:
+            try:
+                from .engine import resolve_offline_model_files  # noqa: PLC0415
+
+                resolve_offline_model_files(offline_model_dir)
+            except FileNotFoundError as exc:
+                problems.append(str(exc))
     if not python_exe or not os.path.isabs(python_exe):
         problems.append("解释器不是绝对路径：%r" % python_exe)
     elif not os.path.isfile(python_exe):
@@ -65,10 +76,19 @@ def self_check(python_exe: str, cwd: str, model_dir: str) -> CheckResult:
     return CheckResult(problems)
 
 
-def build_record(*, python_exe: str, cwd: str, model_dir: str, model_name: str, port: int) -> dict:
+def build_record(*, python_exe: str, cwd: str, model_dir: str, model_name: str, port: int,
+                 offline_model_dir: str = "", offline_model_name: str = DEFAULT_OFFLINE_MODEL_NAME) -> dict:
     env: dict[str, str] = {"RUYI_ASR_STREAM_MODEL_DIR": model_dir}
     if model_name and model_name != DEFAULT_MODEL_NAME:
         env["RUYI_ASR_STREAM_MODEL"] = model_name
+    provides = [{"type": "asr-stream", "basePath": "/v1", "model": model_name or DEFAULT_MODEL_NAME}]
+    if offline_model_dir:
+        # 131c：同一个进程同时提供整段识别（SenseVoice）—— 如意会生成一个带两种标记模型的服务商，
+        # 「整段识别」候选里就多了一个不要显卡的本地选项。
+        env["RUYI_ASR_STREAM_OFFLINE_MODEL_DIR"] = offline_model_dir
+        if offline_model_name and offline_model_name != DEFAULT_OFFLINE_MODEL_NAME:
+            env["RUYI_ASR_STREAM_OFFLINE_MODEL"] = offline_model_name
+        provides.append({"type": "asr", "basePath": "/v1", "model": offline_model_name or DEFAULT_OFFLINE_MODEL_NAME, "protocol": "transcriptions"})
     return {
         "schema": SCHEMA,
         "id": COMPONENT_ID,
@@ -87,7 +107,7 @@ def build_record(*, python_exe: str, cwd: str, model_dir: str, model_name: str, 
             "health": "/health",
             "component": COMPONENT_NAME_TAG,
         },
-        "provides": [{"type": "asr-stream", "basePath": "/v1", "model": model_name or DEFAULT_MODEL_NAME}],
+        "provides": provides,
         "registeredAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     }
 
@@ -110,18 +130,21 @@ def write_record(record: dict, path: Path) -> None:
 
 
 def register(*, model_dir: str = "", model_name: str = DEFAULT_MODEL_NAME, port: int = DEFAULT_PORT,
-             python_exe: str = "", cwd: str = "", env=None, out=None) -> int:
+             python_exe: str = "", cwd: str = "", env=None, out=None,
+             offline_model_dir: str = "", offline_model_name: str = DEFAULT_OFFLINE_MODEL_NAME) -> int:
     out = sys.stdout if out is None else out
     python_exe = os.path.abspath(python_exe or sys.executable)
     cwd = os.path.abspath(cwd or _package_root())
     model_dir = os.path.abspath(model_dir) if model_dir else ""
-    check = self_check(python_exe, cwd, model_dir)
+    offline_model_dir = os.path.abspath(offline_model_dir) if offline_model_dir else ""
+    check = self_check(python_exe, cwd, model_dir, offline_model_dir)
     if not check.ok:
         print("自检没过，不登记（登记文件存在 = 如意会去执行它）：", file=out)
         for p in check.problems:
             print("  - " + p, file=out)
         return 1
-    record = build_record(python_exe=python_exe, cwd=cwd, model_dir=model_dir, model_name=model_name, port=port)
+    record = build_record(python_exe=python_exe, cwd=cwd, model_dir=model_dir, model_name=model_name, port=port,
+                          offline_model_dir=offline_model_dir, offline_model_name=offline_model_name)
     path = registration_path(env)
     write_record(record, path)
     print("已登记：%s" % path, file=out)

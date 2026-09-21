@@ -100,15 +100,18 @@ if (-not (Test-Path $cfg)) {
 Write-Host ""
 Write-Host ("模型就位：" + $Dest) -ForegroundColor Green
 
+$modelsRoot = Split-Path -Parent $Dest
 if ($NoRegister) {
     Write-Host "-NoRegister：跳过登记。要让如意自动接入，手动跑："
-    Write-Host ("  " + $py + " -m ruyi_asr_shim register --model-dir """ + $Dest + """ --model " + $Model)
+    Write-Host ("  " + $py + " -m ruyi_asr_shim register --model auto --models-root """ + $modelsRoot + """")
     exit 0
 }
 
+# 登记成 auto：models 目录里有几份（0.6B / 1.7B）就在第一发请求时按空闲显存挑最大能装下的；
+# 以后再下一份更大的，不用重新登记。想钉死某一份：register --model-dir <目录> --model <名>。
 Write-Host ""
-Write-Host "==> 向如意登记本组件" -ForegroundColor Cyan
-& $py -m ruyi_asr_shim register --model-dir $Dest --model $Model
+Write-Host "==> 向如意登记本组件（auto：按显存挑最大能装下的模型）" -ForegroundColor Cyan
+& $py -m ruyi_asr_shim register --model auto --models-root $modelsRoot
 if ($LASTEXITCODE -ne 0) {
     Write-Host "登记没成（见上面的原因）。服务本身仍然可以手动起：scripts\start.ps1" -ForegroundColor Yellow
     exit $LASTEXITCODE

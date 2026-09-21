@@ -125,7 +125,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 | --- | --- | --- |
 | `RUYI_ASR_PORT` | `8790` | 监听端口。**如意可能会另挑一个端口经这个变量告诉本服务，以它为准。** |
 | `RUYI_ASR_MODEL_DIR` | 空 | 本地模型目录。不填就尝试联网下载（大陆可能很慢）。 |
-| `RUYI_ASR_MODEL` | `qwen3-asr-0.6b` | 也可 `qwen3-asr-1.7b`。这个名字就是如意里要填的模型名。 |
+| `RUYI_ASR_MODEL` | `qwen3-asr-0.6b` | 也可 `qwen3-asr-1.7b`，或 **`auto`**（见下一行）。这个名字就是如意里要填的模型名（auto 时显示为 `qwen3-asr-auto`）。 |
+| `RUYI_ASR_MODELS_ROOT` | 空 | 配合 `RUYI_ASR_MODEL=auto`：`models` 目录。里面有几份（0.6B／1.7B）就在第一发请求时**按空闲显存挑最大能装下的**（1.7B 要约 4.8 GB 空闲，0.6B 约 2.2 GB；没显卡挑最小的）。`download-model.ps1` 缺省就这样登记，以后再下一份更大的不用重新登记。`/health` 的 `resolvedModel` 报实际挑中的那份。 |
 | `RUYI_ASR_IDLE_UNLOAD_SEC` | `600` | 空闲多少秒卸载模型。`0` = 常驻不卸。 |
 | `RUYI_ASR_DEVICE` | `auto` | `auto` / `cuda` / `amd`(=`rocm`) / `xpu` / `mps` / `directml` / `cpu`。见下。 |
 | `RUYI_ASR_DTYPE` | `auto` | `auto` / `bfloat16` / `float16` / `float32`。 |

@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="首选端口；如意探到被占会另挑一个并经 RUYI_ASR_PORT 告知")
     ap.add_argument("--python", default="", help="登记哪个解释器（缺省＝现在这个）")
     ap.add_argument("--cwd", default="", help="登记的工作目录（缺省＝asr-shim 目录）")
+    ap.add_argument("--models-root", default=os.environ.get("RUYI_ASR_MODELS_ROOT", "").strip(),
+                    help="配合 --model auto：models 目录，里面有几份就按显存挑最大能装下的")
     ns = ap.parse_args(argv)
 
     return register(
@@ -56,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         port=ns.port,
         python_exe=ns.python,
         cwd=ns.cwd,
+        models_root=ns.models_root,
     )
 
 

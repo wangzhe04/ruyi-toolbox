@@ -45,7 +45,7 @@ class CheckResult:
     problems: list[str]
 
 
-def self_check(python_exe: str, cwd: str, model_dir: str) -> CheckResult:
+def self_check(python_exe: str, cwd: str, model_dir: str, models_root: str = "") -> CheckResult:
     problems: list[str] = []
     if not python_exe or not os.path.isabs(python_exe):
         problems.append("解释器路径不是绝对路径：%r" % python_exe)
@@ -58,6 +58,18 @@ def self_check(python_exe: str, cwd: str, model_dir: str) -> CheckResult:
         problems.append("工作目录不存在：%s" % cwd)
     elif not os.path.isfile(os.path.join(cwd, "ruyi_asr_shim", "__init__.py")):
         problems.append("工作目录里没有 ruyi_asr_shim 包：%s" % cwd)
+
+    if models_root:
+        # auto 模式：不看单个目录，看 models 根目录里有没有至少一份下全的候选
+        from .autopick import installed  # noqa: PLC0415
+
+        if not os.path.isabs(models_root):
+            problems.append("models 目录不是绝对路径：%r" % models_root)
+        elif not os.path.isdir(models_root):
+            problems.append("models 目录不存在：%s" % models_root)
+        elif not installed(models_root):
+            problems.append("models 目录里没有下全的 Qwen3-ASR（要 Qwen3-ASR-0.6B-hf 或 Qwen3-ASR-1.7B-hf，含 config.json 与权重）：%s" % models_root)
+        return CheckResult(ok=not problems, problems=problems)
 
     if not model_dir:
         problems.append("没有指定模型目录（--model-dir 或 RUYI_ASR_MODEL_DIR）；"
@@ -82,12 +94,22 @@ def build_record(
     model_name: str,
     port: int,
     now: datetime | None = None,
+    models_root: str = "",
 ) -> dict:
+    from .autopick import AUTO_MODEL_NAME, is_auto  # noqa: PLC0415
+
     env: dict[str, str] = {}
-    if model_dir:
-        env["RUYI_ASR_MODEL_DIR"] = model_dir
-    if model_name and model_name.lower() != "qwen3-asr-0.6b":
-        env["RUYI_ASR_MODEL"] = model_name  # 缺省值不写进去，少一处会过期的事实
+    if models_root and is_auto(model_name):
+        # 用户 2026-09-21 拍板：有多份本地模型就默认用更大的（显存允许的话）。登记只记 models 根目录，
+        # 挑哪份在第一发请求时决定（autopick.py）；如意里显示的模型名固定为 qwen3-asr-auto。
+        env["RUYI_ASR_MODEL"] = "auto"
+        env["RUYI_ASR_MODELS_ROOT"] = models_root
+        model_name = AUTO_MODEL_NAME
+    else:
+        if model_dir:
+            env["RUYI_ASR_MODEL_DIR"] = model_dir
+        if model_name and model_name.lower() != "qwen3-asr-0.6b":
+            env["RUYI_ASR_MODEL"] = model_name  # 缺省值不写进去，少一处会过期的事实
     stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return {
         "schema": SCHEMA,
@@ -149,6 +171,7 @@ def register(
     cwd: str = "",
     env=None,
     out=None,
+    models_root: str = "",
 ) -> int:
     """写登记文件。回 0 成功、非 0 失败（自检不过时【不写】）。"""
     out = out or sys.stderr
@@ -157,8 +180,14 @@ def register(
     python_exe = os.path.abspath(python_exe or sys.executable)
     cwd = os.path.abspath(cwd or _package_root())
     model_dir = os.path.abspath(model_dir) if model_dir else ""
+    from .autopick import is_auto  # noqa: PLC0415
 
-    check = self_check(python_exe, cwd, model_dir)
+    models_root = os.path.abspath(models_root) if (models_root and is_auto(model_name)) else ""
+    if is_auto(model_name) and not models_root:
+        print("登记失败：--model auto 必须同时给 --models-root <models 目录>。", file=out)
+        return 3
+
+    check = self_check(python_exe, cwd, model_dir, models_root)
     if not check.ok:
         print("登记失败，自检没过（登记文件存在就意味着如意会去执行它，所以不写）：", file=out)
         for p in check.problems:
@@ -167,7 +196,7 @@ def register(
 
     record = build_record(
         python_exe=python_exe, cwd=cwd, model_dir=model_dir,
-        model_name=model_name, port=port,
+        model_name=model_name, port=port, models_root=models_root,
     )
     path = registration_path(env)
     write_record(record, path)
