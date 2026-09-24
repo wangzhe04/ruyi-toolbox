@@ -6,6 +6,8 @@
     powershell -ExecutionPolicy Bypass -File tools\tests\progress_tests.ps1
 #>
 $ErrorActionPreference = "Stop"
+# test_scripts.py 按 UTF-8 读本脚本的输出；中文 Windows 控制台缺省是 GBK（代码页 936），不改的话「0 失败」对不上。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path (Split-Path -Parent $here) "package-bundle.ps1")   # 点号源：只带进函数，不开窗口也不打包
 
@@ -191,6 +193,34 @@ try {
     Test-PackagePreflight -Work ([ordered]@{ small = $wSmall }) -OutputDir $tmp -Log $quiet
     Assert-True $true "预检：空间够、不需要联网 ＝ 通过"
     Assert-True (@(Get-ChildItem $tmp -Filter ".write-test-*").Count -eq 0) "预检的写入探针不留残留"
+
+    # ── 只勾一份模型：register 参数要拼得出来 ─────────────────────────────────────────────────────
+    # 回归：$sel = if (...) { ... } else { @(...) } 会把单元素数组拆成字符串，BuildRegisterArgs 里的 .Count 在
+    # StrictMode 下炸（2026-09-24 打「只带 0.6B」的包时实测撞上）。造一个假仓库：asr-shim（走专属表）＋ 一个通用兜底组件。
+    $fakeRepo = Join-Path $tmp "repo"
+    foreach ($spec in @(@{ Dir = "asr-shim"; Mod = "ruyi_asr_shim"; Model = "Qwen3-ASR-0.6B-hf" },
+                        @{ Dir = "fakecomp"; Mod = "ruyi_fakecomp"; Model = "only-model" })) {
+        $cd = Join-Path $fakeRepo $spec.Dir
+        New-Item -ItemType Directory -Force -Path (Join-Path $cd $spec.Mod), (Join-Path $cd "scripts"), (Join-Path $cd ("models\" + $spec.Model)) | Out-Null
+        Set-Content -LiteralPath (Join-Path $cd "pyproject.toml") -Value ('[project]' + "`r`n" + 'dependencies = []') -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $cd "scripts\install.ps1") -Value "# fake" -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $cd ($spec.Mod + "\__main__.py")) -Value "" -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $cd ("models\" + $spec.Model + "\w.bin")) -Value "x" -Encoding ASCII
+    }
+    $r = New-ToolboxBundle -RepoRoot $fakeRepo -ComponentIds @("asr-shim", "fakecomp") `
+        -ModelSelection @{ "asr-shim" = @("qwen3-asr-0.6b"); "fakecomp" = @("only-model") } `
+        -OutputDir (Join-Path $tmp "out") -ZipName "one-model" -Log $quiet -Report { param($s) }
+    $byId = @{}; foreach ($mc in $r.Components) { $byId[$mc.id] = $mc }
+    Assert-Eq ($byId["asr-shim"].models -join ",") "Qwen3-ASR-0.6B-hf" "只勾一份：asr-shim 只带那一份模型"
+    Assert-Eq ($byId["asr-shim"].registerArgs -join " ") "register --model auto --models-root {CompDir}\models" "只勾一份：asr-shim 的 register 参数拼得出来"
+    Assert-Eq ($byId["fakecomp"].registerArgs -join " ") "register --model-dir {CompDir}\models\only-model" "只勾一份：通用兜底走 --model-dir 那一支"
+    # 生成的双击入口不能带 BOM（cmd.exe 会把 BOM 当成命令的一部分，@echo off 失效）
+    $za = [System.IO.Compression.ZipFile]::OpenRead($r.ZipPath)
+    try {
+        $entry = $za.Entries | Where-Object { $_.Name -like "*.cmd" } | Select-Object -First 1
+        $sr = $entry.Open(); $head = New-Object byte[] 9; [void]$sr.Read($head, 0, 9); $sr.Dispose()
+        Assert-Eq ([System.Text.Encoding]::ASCII.GetString($head)) "@echo off" "生成的 .cmd 以 @echo off 开头、没有 BOM"
+    } finally { $za.Dispose() }
 }
 finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
