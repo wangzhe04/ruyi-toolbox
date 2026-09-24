@@ -13,7 +13,7 @@
   -Gpu amd    装 AMD 官方 ROCm on Windows 的轮子（要求 Python 3.12 + 26.2.2 及以上的显卡驱动，
               且显卡在 AMD 的支持列表里：RX 9070/9070XT/9060XT、RX 7900XTX/7700、W7900、
               AI PRO R9700，或 Ryzen AI Max+ 395 这类 gfx1150/1151 APU）
-              ⚠️ 这条路【没有在本项目里真机验证过】—— 开发机只有英伟达卡。
+              已在 RX 7650 GRE（gfx1102，不在官方列表里）上真机跑通；其它卡没测过。
   -Gpu cpu    装 CPU 构建（能跑，但很慢）
 
   跑完之后下一步是 scripts\download-model.ps1（拉模型并向如意登记本组件）。
@@ -137,7 +137,7 @@ elseif ($Gpu -eq "amd") {
         exit 1
     }
     Write-Host ""
-    Write-Host "注意：这条 AMD 路线【没有在本项目里真机验证过】（开发机只有英伟达卡）。" -ForegroundColor Yellow
+    Write-Host "注意：这条 AMD 路线只在 RX 7650 GRE（gfx1102）上真机验证过，其它卡没测过。" -ForegroundColor Yellow
     Write-Host "前提：显卡驱动 26.2.2 及以上，且显卡在 AMD 的 Windows 支持列表里。" -ForegroundColor Yellow
     Write-Host "官方页面（装不上时以它为准）：" -ForegroundColor Yellow
     Write-Host "  https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html"

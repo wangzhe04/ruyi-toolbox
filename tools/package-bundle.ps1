@@ -92,7 +92,7 @@ $script:ComponentOverrides = @{
         GpuOrder = @("nvidia", "amd", "cpu")
         GpuTorch = @{
             nvidia = @{ Label = "NVIDIA（CUDA cu128）"; IndexUrl = "https://download.pytorch.org/whl/cu128"; Approx = "约 3 GB"; Bytes = 2750MB }
-            amd    = @{ Label = "AMD（ROCm on Windows，⚠ 未经真机验证）"; Rocm = $true; Approx = "约 2.2 GB"; Bytes = 2200MB }
+            amd    = @{ Label = "AMD（ROCm on Windows，⚠ 离线装未经真机验证）"; Rocm = $true; Approx = "约 2.2 GB"; Bytes = 2200MB }
             cpu    = @{ Label = "CPU（体积小，推理慢）"; IndexUrl = "https://download.pytorch.org/whl/cpu"; Approx = "约 200 MB"; Bytes = 200MB }
         }
         # AMD 那几个直链的版本号；必须跟 asr-shim\scripts\install.ps1 里的 $RocmRelease／torch-x.y.z 保持一致
@@ -624,7 +624,7 @@ function Save-MissingDeps {
         if ($isRocm) {
             $rocmDir = Join-Path $WheelsDir "rocm"
             New-Item -ItemType Directory -Force -Path $rocmDir | Out-Null
-            & $Log ("  下载 AMD ROCm 的 PyTorch 与 SDK（" + (Format-Bytes ([long]$est)) + "，直链，未经真机验证）……")
+            & $Log ("  下载 AMD ROCm 的 PyTorch 与 SDK（" + (Format-Bytes ([long]$est)) + "，直链，离线装未经真机验证）……")
             for ($i = 0; $i -lt $rocmUrls.Count; $i++) {
                 $url = $rocmUrls[$i]
                 $leaf = [System.Uri]::UnescapeDataString($url.Substring($url.LastIndexOf('/') + 1))
@@ -1190,7 +1190,9 @@ function New-ToolboxBundle {
 
         $registerArgs = $null
         if ($bundledModelNames.Count -gt 0) {
-            $sel = if ($c.ModelKind -eq "pair") { $w.Selection } else { @($w.Selection) }
+            # 不能写成 $sel = if (...) { ... } else { @(...) }：if 表达式的输出会把只有一个元素的数组拆成标量字符串，
+            # BuildRegisterArgs 里的 $Selection.Count 在 StrictMode 下就炸（只勾一份模型时必现）。分开赋值数组才留得住。
+            if ($c.ModelKind -eq "pair") { $sel = $w.Selection } else { $sel = @($w.Selection) }
             $registerArgs = & $c.BuildRegisterArgs $sel
         }
         if (-not $registerArgs) {
@@ -1278,7 +1280,9 @@ function New-ToolboxBundle {
     $setupPs1 = Get-SetupScriptText
     Set-Utf8BomFile -Path (Join-Path $stageDir "setup.ps1") -Text $setupPs1
     $setupCmd = "@echo off`r`nchcp 65001 >nul`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0setup.ps1`" %*`r`necho.`r`npause`r`n"
-    Set-Utf8BomFile -Path (Join-Path $stageDir "安装并接入如意.cmd") -Text $setupCmd
+    # .cmd 不能带 BOM：cmd.exe 不认 BOM，会把它当成第一行命令的一部分（报「'锘緻echo' 不是内部或外部命令」，
+    # @echo off 也就没生效，后面每条命令都回显）。内容全是 ASCII，写成无 BOM 的纯 ASCII。
+    [System.IO.File]::WriteAllBytes((Join-Path $stageDir "安装并接入如意.cmd"), [System.Text.Encoding]::ASCII.GetBytes($setupCmd))
     Exit-ProgressStage
 
     & $Log ("`n==> 压缩")

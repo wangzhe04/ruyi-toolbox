@@ -87,7 +87,7 @@ transformers、numpy、sherpa-onnx 之类）默认还是 `install.ps1` 在目标
   的系统 Python——系统是 3.13 时，直接 `pip download` 下出来的全是 `cp313` 轮子，3.12 的 venv 装不上。
 - **界面上会告诉你**缺哪个：勾上「打包依赖库」就显示「本机已有 N 个包……；需要联网下载：……」，asr-shim 的
   显卡下拉框里每一项都标着「本机已装，直接用」或「需下载」。选 **NVIDIA** 就是本机现成的；**AMD**（ROCm）和
-  **CPU** 是本机没有的构建，选了才会去下（AMD 走 AMD 官方直链，⚠ 未经真机验证）。
+  **CPU** 是本机没有的构建，选了才会去下（AMD 走 AMD 官方直链，⚠ 离线装未经真机验证）。
 - **自检**：打完轮子，会在一个全新的临时环境里、用**空的 uv 缓存**、按目标机器的办法（`UV_OFFLINE`＋
   `UV_FIND_LINKS`）演练一遍装环境；缺轮子就中止并说清楚。空缓存是关键——否则在这台装过一堆东西的机器上，缺的
   包会被 uv 缓存悄悄补上，自检永远通过。
@@ -99,7 +99,7 @@ transformers、numpy、sherpa-onnx 之类）默认还是 `install.ps1` 在目标
 
 模型 + 依赖库都打包的话，目标机器只需要预先装好 Python 3.12（`uv venv --python 3.12` 认的那个解释器；
 离线模式下 `uv` 不会去联网下载解释器本身），装完 Python 之后整套流程——解压、装环境、登记模型、启动
-服务——都不用联网。已知限制（AMD 未验证、Python 3.12 前提）见下面「已知限制」。
+服务——都不用联网。已知限制（AMD 离线装未验证、Python 3.12 前提）见下面「已知限制」。
 
 ## 进度、取消与预检
 
@@ -162,8 +162,8 @@ python -m unittest discover -s tools/tests
 - **AMD ROCm 的离线打包未经真机验证**：asr-shim 的 `install.ps1` 装 ROCm 版 PyTorch 用的是几个写死的 wheel
   直链而不是 PyPI 兼容的 index，`uv` 的 `--offline`／`--find-links` 管不到它们。打包器把这几个文件用 `curl` 下到
   `.offline-wheels\rocm\`，`install.ps1` 的 AMD 分支见到这个目录就直接装本地文件；离线自检也会 dry-run 它。
-  但这条路**没有在真的 AMD 卡上装过、跑过**（开发机只有英伟达卡），和 `install.ps1` 里原有的在线 ROCm 分支一样
-  是「按 AMD 官方文档抄对了」的状态。
+  但这条路**没有在真的 AMD 卡上离线装过**。ROCm 上的推理本身已在 RX 7650 GRE 上真机跑通（用的正是这几个文件
+  对应的版本，见 asr-shim README「AMD 实测」），没验证的只是「打进包 → 在 AMD 目标机上离线装」这一步。
 - **单个文件超过 2 GB 没问题了**：以前压缩用 `Compress-Archive`，它在 Windows PowerShell 5.1 里遇到单个文件
   超过 2 GB 就报 `Stream was too long`（实测 2.3 GB 的文件必挂），而 Qwen3-ASR-1.7B 的 `model.safetensors` 有
   4 GB、CUDA 版 PyTorch 的轮子近 3 GB。现在改成直接用 .NET 的 `ZipArchive` 流式写；轮子、权重这类已经压过的

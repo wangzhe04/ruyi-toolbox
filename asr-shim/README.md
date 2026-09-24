@@ -50,7 +50,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 
 ---
 
-## 实测（2026-09-21，本机真跑）
+## 实测（2026-09-21，英伟达卡真跑）
+
+AMD 卡的实测在下面「显卡加速 → AMD 卡」一节。
 
 机器：Windows 11、**RTX 5080 Laptop 16 GB**（Blackwell sm_120）、Python 3.12.11、
 `torch 2.11.0+cu128`、`transformers 5.17.0`、`soundfile 0.14.0`（libsndfile 1.2.2）。
@@ -151,7 +153,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 `scripts\install.ps1` 自动认卡并装 **cu128** 构建。RTX 50 系是 Blackwell（sm_120），
 **必须 cu128 及以上**，老的 cu121／cu124 轮子在这块卡上起不来。
 
-### AMD 卡 —— ⚠️ **本项目未经真机验证**（开发机只有英伟达卡）
+### AMD 卡 —— 已在 RX 7650 GRE 上真机验证（2026-09-24）
 
 走 **AMD 官方的 ROCm on Windows** 轮子。好消息是代码不用分叉：在这条路上
 `torch.cuda.is_available()` 就是 `True`、设备字符串还是 `"cuda"`，所以它落在**第一档**，
@@ -168,15 +170,51 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Gpu amd
 - 显卡在 AMD 的 Windows 支持列表里：RX 9070 / 9070 XT / 9060 XT、Radeon AI PRO R9700、
   RX 7900 XTX、RX 7700、PRO W7900，或 Ryzen AI Max+ 395 这类 gfx1150/1151 APU。
   **780M（gfx1103）不在 AMD 的正式支持列表里**（AMD 文档与 ROCm/TheRock 的清单口径冲突）。
+  **实测：RX 7650 GRE（gfx1102）也不在列表里，但能跑**（见下面实测），同为 RDNA3 的
+  7600／7600 XT 大概率一样，但没测过。
 - dtype 缺省 **float16** 而不是 bfloat16：AMD 的 Windows 支持矩阵只承诺 FP16（RDNA4 另加 FP8），
   通篇没提 BF16，而且 gfx1100 上有过 bf16 相关的崩溃记录。想试：`RUYI_ASR_DTYPE=bfloat16`。
+  实测 gfx1102 上 bf16 能跑、结果一样，但热态慢约 30%（0.80 s 对 0.61 s），所以缺省不变。
 
 官方安装页：<https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html>
 
-**我们做到与没做到的**：设备选择与降级逻辑用假探针写了单测并全绿（含「ROCm 要被识别成 rocm」
-「dtype 缺省 float16」「分配显存失败要降级」）；安装命令按 AMD 官方文档逐条抄对。
-**但一行都没在真的 AMD 卡上跑过**，网上也找不到 Qwen3-ASR 在 ROCm 上的实测先例。
-卡不在支持列表里就用 CPU（见下），别在 AMD GPU 上死磕。
+#### AMD 实测（2026-09-24，本机真跑）
+
+机器：**AMD Radeon RX 7650 GRE 8 GB**（gfx1102，RDNA3）、Ryzen 5 5500、驱动 32.0.31041.1004、
+Python 3.12.10、`torch 2.9.1+rocm7.2.1`（HIP 7.2.53211）、ROCm SDK 7.2.1、`transformers 5.17.0`。
+按登记文件的 `run` 拉起（＝如意的做法），样例音频同上面英伟达那节。
+
+| 量的是什么 | 实测 |
+| --- | --- |
+| 启动到 `/health` 就绪 | **0.57 s**；空转不占显存（0 MB） |
+| 第一发（含加载 10.7 s） | **15.1 s** |
+| 热态 · 中文 5.43 s | **0.61 – 0.72 s**，逐字正确 |
+| 热态 · 英文 6.03 s | **0.80 – 0.87 s**（同样把 pull 听成 poll） |
+| 热态 · 中文 + `language=zh` + 热词 | **0.50 – 0.51 s** |
+| 长音频 45.8 s（切 2 段） | 这台机器上头一回 **25.7 s**，之后 **4.3 – 4.9 s**（重启进程也是；见下面第 2 条） |
+| 卸载后重新加载的第一发 | **3.3 s**（加载 2.7 s） |
+| 换 1.7B（请求带 `model`） | 第一发 **7.9 s**（加载 7.1 s），之后中文 0.63 – 0.67 s、英文 0.80 – 0.88 s |
+| 进程显存 | 0.6B **≈ 2.1 GB**（长音频后 2.3 GB）；1.7B **≈ 4.8 GB**。8 GB 卡两份都装得下 |
+| 模型占着显存时杀「父进程」 | **3.7 s** 后自退，退出码 0；整卡显存从 3971 MB 回到 1498 MB（＝本底），不留孤儿 |
+
+**和英伟达不一样、要知道的几件事：**
+
+1. **`/v1/unload` 之后进程还占约 1.1 – 1.5 GB 显存。** PyTorch 这一层是还干净了的
+   （reserved 从 1644 MB 掉到 108 MB），剩下的是 Windows 上的 HIP 运行时自己留着不还给驱动。
+   它不是泄漏：再加载会复用这块（换尺寸、重载都不往上涨）；**进程一退就全还**（看门狗那条实测回到本底）。
+   对比：英伟达上卸载后只剩约 240 MB 的 CUDA 上下文。显存紧的话，只有让进程退出才能全拿回来（如意退出时会回收它）。
+2. **一种新长度的音频，在一台机器上头一回会慢一截。** ROCm 第一次见到某种张量形状要现备内核：
+   45.8 s 长音频头一回 25.7 s、之后 4.3 – 4.9 s。备好的内核会缓存在磁盘上，**重启进程后也不用再备**
+   （第二轮实测新进程里同一条长音频直接 4.9 s，冷启第一发也从 15.1 s 降到 12.5 s）。
+3. **stderr 里有两类噪声，不用管**：
+   - `Claude: Unknown command line argument '…offload-arch.exe'` —— 安装路径里有空格（如 `Claude Code`）时，
+     ROCm SDK 探测显卡型号用的 `os.execv` 在 Windows 上不给带空格的路径加引号。探测失败后它退回装好的那套库，
+     不影响推理；装在不带空格的路径下就没这行。
+   - `Flash/Mem Efficient attention on Current AMD GPU is still experimental` —— PyTorch 自动退回普通注意力实现，结果不受影响。
+
+**没验证的**：本次没重跑 `install.ps1 -Gpu amd`（实测用的环境与脚本钉的版本逐项一致：ROCm SDK 7.2.1 四个包＋
+`torch 2.9.1+rocm7.2.1`）；AMD 的**离线打包**（`tools/package-bundle.ps1` 带 ROCm 依赖）没在 AMD 目标机上装过；
+支持列表里的其它卡、RDNA4、APU 都没测。卡不在支持列表、又跑不起来，就用 CPU（见下），别在 AMD GPU 上死磕。
 
 ### 为什么不推荐 torch-directml
 

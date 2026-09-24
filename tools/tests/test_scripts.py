@@ -17,10 +17,12 @@ WINDOWS = sys.platform == "win32" and POWERSHELL is not None
 
 
 def _scripts():
-    skip = {".venv", "models", "samples", ".git", "__pycache__", "dist"}
+    skip = {"models", "samples", ".git", "__pycache__", "dist"}
     out = []
     for p in ROOT.rglob("*"):
-        if p.suffix.lower() in (".ps1", ".cmd") and not (set(p.relative_to(ROOT).parts) & skip):
+        parts = p.relative_to(ROOT).parts
+        # .venv 之外还有 .venv-rocm 这类并列环境（打包器同样按 .venv* 排除），里面的 activate.ps1 不归本仓管
+        if p.suffix.lower() in (".ps1", ".cmd") and not (set(parts) & skip) and not any(x.startswith(".venv") for x in parts):
             out.append(p)
     return sorted(out)
 

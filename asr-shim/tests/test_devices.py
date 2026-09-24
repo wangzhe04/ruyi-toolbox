@@ -1,8 +1,8 @@
 """设备选择与降级（不只针对英伟达）。
 
-这台开发机只有英伟达卡，AMD／Intel／Apple 那几档**没法真机验证**。所以这里用假探针把
+开发机只有英伟达卡时，AMD／Intel／Apple 那几档**没法真机验证**（AMD 后来在 RX 7650 GRE 上真机跑通过，见 README）。所以这里用假探针把
 【选择与降级逻辑】整个测掉：顺序对不对、一档坏了会不会降、显式指定了但用不了会不会降、
-CPU 是不是永远兜得住。真机能验的只有 cuda 与 cpu 两档（见 README「实测」一节）。
+CPU 是不是永远兜得住。真机验过的是 cuda、rocm 与 cpu 三档（见 README「实测」与「AMD 实测」）。
 """
 
 from __future__ import annotations
@@ -57,11 +57,13 @@ class FakeTorch:
         hip = None
 
     class _Cuda:
-        def __init__(self, available=True, bf16=True, name="Fake GPU", alloc_ok=True):
+        def __init__(self, available=True, bf16=True, name="Fake GPU", alloc_ok=True, sync_ok=True):
             self._available = available
             self._bf16 = bf16
             self._name = name
             self.alloc_ok = alloc_ok
+            self.sync_ok = sync_ok
+            self.synced = 0
 
         def is_available(self):
             return self._available
@@ -71,6 +73,11 @@ class FakeTorch:
 
         def get_device_name(self, i):
             return self._name
+
+        def synchronize(self):
+            self.synced += 1
+            if not self.sync_ok:
+                raise RuntimeError("hipErrorInvalidDeviceFunction")
 
     bfloat16 = "bfloat16"
     float16 = "float16"
@@ -195,6 +202,17 @@ class TestCudaProbe(unittest.TestCase):
         """驱动/轮子对不上时（AMD 那边的 hipErrorInvalidImage 就是这形状）要判成这一档用不了。"""
         with self.assertRaises(DeviceUnavailable):
             probe_cuda(FakeTorch(alloc_ok=False))
+
+    def test_async_kernel_failure_surfaces_at_synchronize(self):
+        """内核是异步发的：分配那一下没报错、错误要到 synchronize 才冒出来，也得判成用不了。"""
+        with self.assertRaises(DeviceUnavailable):
+            probe_cuda(FakeTorch(sync_ok=False))
+
+    def test_probe_synchronizes(self):
+        """Windows ROCm 上发了内核不同步就退出，进程会卡在退出阶段（doctor 因此挂住过）。"""
+        t = FakeTorch()
+        probe_cuda(t)
+        self.assertGreaterEqual(t.cuda.synced, 1)
 
     def test_dtype_override(self):
         c = probe_cuda(FakeTorch(bf16=True), dtype_pref="float32")
