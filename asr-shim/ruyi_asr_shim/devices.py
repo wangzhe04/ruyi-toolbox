@@ -1,7 +1,7 @@
 """设备选择：可插拔的一层，一档坏了自动降到下一档。
 
 为什么单独一个模块：显卡后端是本 shim 最容易坏、也最无法在一台机器上测全的地方
-（这台开发机只有英伟达卡）。把「有哪些档、按什么顺序试、坏了怎么降」抽出来，
+（开发时只有英伟达卡；AMD 那档后来在 RX 7650 GRE 上真机验证过，其余几档仍没有）。把「有哪些档、按什么顺序试、坏了怎么降」抽出来，
 就能用假探针把**选择与降级逻辑**整个测掉，不需要真的有那块卡。
 
 auto 的顺序：
@@ -118,8 +118,11 @@ def probe_cuda(torch, dtype_pref: str = "auto") -> DeviceChoice:
 
     # 真的碰一下显存：驱动与轮子对不上时这里就会炸（AMD 那边 hipErrorInvalidImage 就是这个形状），
     # 早炸早降级，好过加载到一半才崩。
+    # synchronize 不能省：内核是异步发的，不等它，内核层面的错误到不了这个 try 里；而且 Windows 上的 ROCm
+    # 有个实测的坑——发了内核没同步就退出的进程会卡在退出阶段不走（doctor 因此挂住，install.ps1 的自检跟着挂）。
     try:
         probe = torch.zeros(8, dtype=dtype, device="cuda")
+        torch.cuda.synchronize()
         del probe
     except Exception as exc:
         raise DeviceUnavailable(

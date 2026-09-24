@@ -196,23 +196,38 @@ if isinstance(audio, np.ndarray):
   `torch.cuda.is_available()` 是同一件事，不是额外一条路。
 - 本 shim 不用 `device_map="auto"`：我们自己挑设备、自己 `.to()`，这样降级逻辑才在我们手里。
 
-### 8.5 本项目对 AMD 的验证状态 —— **未经真机验证**
+### 8.5 本项目对 AMD 的验证状态 —— **已在一块 AMD 卡上真机验证（2026-09-24）**
 
-开发机是 RTX 5080 Laptop，**没有 AMD 卡，AMD 路径一行真机代码都没跑过**。做到的是：
+最初的开发机是 RTX 5080 Laptop，当时 AMD 路径只有假探针单测（`tests/test_devices.py`）和逐条对照官方文档的安装命令。
+2026-09-24 在 **RX 7650 GRE 8 GB（gfx1102，RDNA3）**、驱动 32.0.31041.1004、`torch 2.9.1+rocm7.2.1`、ROCm SDK 7.2.1
+（与 `install.ps1 -Gpu amd` 钉的版本逐项一致）上按登记文件真跑，数字见 README「AMD 实测」。结论：
 
-1. 选择与降级逻辑用假探针写了单测并全绿（`tests/test_devices.py`，含「ROCm 构建要被识别成 rocm
-   且设备字符串仍是 cuda」「dtype 缺省 float16」「分配显存失败要降级」这几条）。
-2. `install.ps1 -Gpu amd` 的安装命令按 AMD 官方文档逐条抄对（ROCm 版本、四个 SDK 包、轮子文件名、
-   Python 3.12 与驱动 26.2.2 的前提）。
-3. README 与本文都明写「未经真机验证」。
+1. **单测里的判断都成立**：`torch.cuda.is_available()` 为真、设备字符串是 `"cuda"`、`torch.version.hip` 有值
+   → 落在第一档并显示成 `rocm`；dtype 缺省 float16。`get_device_capability()` 在 gfx1102 上回 `(11, 0)`，
+   所以 `doctor` 在 ROCm 上改报 `gcnArchName`（`gfx1102`），不再印出 `sm_110` 这种英伟达写法。
+2. Qwen3-ASR 0.6B／1.7B 在 ROCm 上用 `AutoModelForMultimodalLM` + `generate()` **原样可跑**，中文逐字正确，不需要改代码。
+3. **卸载后的残留显存与英伟达不同**：`empty_cache()` 之后 PyTorch reserved 掉到约 108 MB，但 Windows 上的
+   HIP 运行时仍然给进程留着约 1.1 – 1.5 GB，不还给驱动；再加载会复用，进程退出全部归还。
+   单独的最小实验（只建上下文、跑一次 fp16 matmul／SDPA／conv1d、再分配又释放 1 GB）残留只有约 350 MB，
+   说明多出来的部分跟真实模型的分配模式有关，不是 shim 持有引用（`gc` 里找不到任何存活的 CUDA 张量）。
+4. 新形状首次执行要现备内核（45.8 s 长音频头一回 25.7 s、之后 4.3 – 4.9 s）；备好的内核跨进程有磁盘缓存，第二轮在新进程里同一条长音频直接 4.9 s、冷启第一发 15.1 s → 12.5 s。
+5. ROCm SDK 的 `rocm_sdk._dist_info.discover_current_target_family()` 经 `Scripts\offload-arch.exe`
+   → `rocm_sdk_core._cli._exec()` → `os.execv()` 调 LLVM 的 `offload-arch`；Windows 上 `os.execv` 不给带空格的
+   argv 加引号，路径含空格时 stderr 会冒一行 `Unknown command line argument`，随后退回已装的库，不影响推理。
+6. **真机才测出来的 bug（已修）**：Windows ROCm 上，进程发了 GPU 内核、没 `synchronize` 就退出，会**卡在退出阶段不走**
+   （最小复现：`torch.zeros(8, dtype=torch.float16, device="cuda"); del p` 后退出——挂住；中间加一句
+   `torch.cuda.synchronize()`——3 s 正常退出）。`devices.probe_cuda` 的显存探针正好是这个形状，于是 `doctor` 打印完就挂住，
+   `install.ps1 -Gpu amd` 最后一步「自检」会跟着挂。修法是探针里分配完立刻 `synchronize()`——顺带让异步报出的内核错误
+   也落进探针的 `try`，按原意降级。服务进程本身不受影响（它靠看门狗／被杀退出，实测 3.7 s 自退）。
 
-**没做到的**：没有在任何 AMD 卡上跑过 `Qwen3-ASR-0.6B-hf`。网上也**找不到**
-`AutoModelForMultimodalLM` + Qwen3-ASR 在 ROCm 上的实测报告（一条都没有），所以连第三方先例都不能引。
+**仍未验证**：`install.ps1 -Gpu amd` 这次没有从零重跑；AMD 离线打包没在 AMD 目标机上装过；其它 AMD 卡、RDNA4、APU 没测。
+网上仍然找不到第三方的 Qwen3-ASR on ROCm 实测报告。
 
 ### 8.6 §8 的不确定项
 
-1. bfloat16 在 Windows ROCm PyTorch 上到底能不能用 —— 官方没有明文，只能实机测。
-2. 780M（gfx1103）的真实状态 —— AMD 正式文档与 TheRock 的清单冲突。
+1. ~~bfloat16 在 Windows ROCm PyTorch 上到底能不能用~~ —— gfx1102 实测能用、结果与 fp16 一致，但热态慢约 30%
+   （0.80 s 对 0.61 s）；缺省保持 float16。其它架构（尤其 gfx1100 的崩溃记录）仍未知。
+2. 780M（gfx1103）的真实状态 —— AMD 正式文档与 TheRock 的清单冲突。gfx1102 同样不在正式列表里，但实测能跑。
 3. `torch.version.hip` 在 Windows 轮子上的确切返回格式 —— 安装页显示「HIP runtime version 7.2.53211」，
    但没找到逐字写出 `torch.version.hip` 返回值的官方片段。本 shim 的代码只判它是不是 None，
    不解析格式，所以这条不影响正确性。

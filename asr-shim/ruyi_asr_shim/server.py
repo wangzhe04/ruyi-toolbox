@@ -625,7 +625,13 @@ def doctor() -> int:
             print("  英伟达卡：装 cu128 及以上的 torch（scripts\\install.ps1 -Gpu nvidia）。")
             print("  AMD 卡：按 README「AMD 显卡」一节装 ROCm on Windows 的轮子。")
             ok = False
-        elif choice.kind in ("cuda", "rocm"):
+        elif choice.kind == "rocm":
+            # ROCm 上 get_device_capability 回的是 (11, 0) 这种，印成 sm_110 是英伟达的写法、会误导；报 gfx 架构名。
+            try:
+                print("架构: %s" % torch.cuda.get_device_properties(0).gcnArchName)
+            except Exception:
+                pass
+        elif choice.kind == "cuda":
             try:
                 cap = torch.cuda.get_device_capability(0)
                 print("算力: sm_%d%d" % cap)
