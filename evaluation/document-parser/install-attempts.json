@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-22",
+  "python": "3.12.11",
+  "platform": "Windows x64",
+  "outcome": "cancelled_by_operator_during_dependency_download",
+  "installationVerified": false,
+  "inferenceTested": false,
+  "attempts": [
+    {
+      "engine": "docling",
+      "requirements": "docling.in",
+      "dependencyResolution": "passed",
+      "startedAt": "2026-09-22T23:10:36+08:00",
+      "stoppedAt": "2026-09-22T23:19:53+08:00",
+      "localLog": "docling-install.log"
+    },
+    {
+      "engine": "paddle",
+      "requirements": "paddle.in",
+      "dependencyResolution": "passed",
+      "startedAt": "2026-09-22T23:15:54+08:00",
+      "stoppedAt": "2026-09-22T23:19:53+08:00",
+      "localLog": "paddle-install-retry.log",
+      "note": "Separate uv cache retry; first attempt stopped before further progress was logged."
+    }
+  ]
+}

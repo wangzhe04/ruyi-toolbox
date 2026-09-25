@@ -1,0 +1,4 @@
+# D0 candidate pins, not a release lock. Resolve full Windows cp312 hashes before release.
+docling==2.129.0
+rapidocr==3.9.2
+onnxruntime==1.30.0

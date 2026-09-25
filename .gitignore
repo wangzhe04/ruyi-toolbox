@@ -33,3 +33,6 @@ samples/
 # 本地临时产物
 .tmp/
 *.log
+
+# D0 generated corpora, engine output and local caches (source scripts stay tracked)
+evaluation/document-parser/work/

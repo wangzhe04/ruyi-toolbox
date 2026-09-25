@@ -2,6 +2,12 @@
 
 > 状态：待实施。入口见 [路线图](03-expansion-roadmap.md)，候选依据见 [调研 §2](04-research-and-decisions.md)。所有门槛是验收目标。
 
+2026-09-22 实施增量：D0 合成样本及评分工具已落到 [`evaluation/document-parser/`](../evaluation/document-parser/README.md)；这是 D0a 的基础工作，不是完成真实样本验收。安装尝试和剩余门槛见 [本轮记录](../evaluation/document-parser/REPORT.md)。
+
+2026-09-24 实施增量：Docling 与 PP-StructureV3 的 12 页 pilot 均已在本机 CPU 跑通（Docling 中位 3.4 s/页、峰值 1.9 GiB；Paddle 中位 44 s/页、峰值 11.7 GiB，单次首跑）；新增对齐提议与临时评分。对齐未经人工复核、未做系统级断网，**仍未选型**。发现合成双栏样本本身有歧义、“相邻块顺序”指标对栏交错不敏感，见 [第二轮记录](../evaluation/document-parser/REPORT.md#d0-第二轮--2026-09-24)。
+
+2026-09-25 实施增量：合成语料重做为生成器 v2（逐页独立排版、行级标注、真正的多栏、复杂表格、噪声/倾斜），两引擎 40 页 dev 全部跑通。临时（未复核）评分下**两者都未达到本节质量门槛**：表格结构（尤其无竖线表格、倾斜扫描表格）是共同短板；PP-StructureV3 在规整表格和多栏顺序上明显更好，Docling 在低质扫描上更准且快约 17 倍、内存约 1/7。仍未选型，详见 [第三轮记录](../evaluation/document-parser/REPORT.md#d0-第三轮--2026-09-25让合成集真正测得出质量)。
+
 ## 1. 场景与范围
 
 目标：“把这批中文扫描 PDF 的表格提取出来，形成可合并的数据，并能返回原页核对。”首版输入 PDF、PNG、JPEG、TIFF；输出规范 JSON、Markdown、表格 CSV。Office 生成交给如意已有工具，首版不做 DOCX/PPTX 重排版、手写专用识别、签章鉴真或自动修正数字。

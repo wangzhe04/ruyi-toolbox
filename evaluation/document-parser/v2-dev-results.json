@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-25",
+  "corpus": {
+    "generatorVersion": 2,
+    "manifestSha256": "e0940416c6f7d5a2878f86f709865a2b071d1ef361a26369cdcc1e36f5f222f2",
+    "selection": "dev (40 pages); holdout not run"
+  },
+  "threads": 4,
+  "hardware": "Intel Core Ultra 9 275HX, 24 logical, 64 GB, CPU only",
+  "networkGuard": "Python audit hook only; OS-level offline NOT verified",
+  "alignment": "machine proposal by align_candidate.py, NOT human-reviewed; scores are PROVISIONAL, not decision evidence",
+  "proposerSha256": "5e4e2cecdd438ba41a3a4f7aec201a2995c01137bc4060f55a25a09f27ab07d9",
+  "scorerSha256": "40b274cf6e6c3f7d61d2848ac30c0734c2dd6ee3a888bfb3fa97c03e399f61e1",
+  "runs": {
+    "docling": {
+      "status": "succeeded",
+      "pagesSucceeded": 40,
+      "pages": 40,
+      "runSha256": "bd91b660bfa50e6cd62d6c595703dd876b632f3a55c590f127f817b33dcb8934",
+      "modelLockSha256": "216b69664d03ae0230eea166ee2a326a5623733945601abe2311c6383a0dbcbf",
+      "note": "TableFormer ACCURATE, RapidOCR onnxruntime ch (mobile-size OCR).",
+      "pageSec": {
+        "median": 3.6,
+        "max": 7.0
+      },
+      "totalMin": 3.0,
+      "peakWorkingSetGiB": 1.7,
+      "provisionalScore": {
+        "columns": {
+          "cellAccuracy": null,
+          "cellTextAccuracy": null,
+          "cellNeighbourAccuracy": null,
+          "numberAccuracy": null,
+          "sourceAccuracy": 1.0,
+          "orderAccuracy": 0.937,
+          "allPairsOrderAccuracy": 0.924,
+          "characterErrorRate": 0.001
+        },
+        "merged_table": {
+          "cellAccuracy": 0.827,
+          "cellTextAccuracy": 0.978,
+          "cellNeighbourAccuracy": 0.93,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.944,
+          "orderAccuracy": 0.957,
+          "allPairsOrderAccuracy": 0.966,
+          "characterErrorRate": 0.015
+        },
+        "mixed": {
+          "cellAccuracy": 0.457,
+          "cellTextAccuracy": 0.983,
+          "cellNeighbourAccuracy": 0.814,
+          "numberAccuracy": 0.96,
+          "sourceAccuracy": 1.0,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.011
+        },
+        "scan": {
+          "cellAccuracy": 0.818,
+          "cellTextAccuracy": 0.966,
+          "cellNeighbourAccuracy": 0.86,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.91,
+          "orderAccuracy": 0.954,
+          "allPairsOrderAccuracy": 0.957,
+          "characterErrorRate": 0.002
+        },
+        "skew": {
+          "cellAccuracy": 0.494,
+          "cellTextAccuracy": 0.931,
+          "cellNeighbourAccuracy": 0.667,
+          "numberAccuracy": 0.985,
+          "sourceAccuracy": 0.867,
+          "orderAccuracy": 0.808,
+          "allPairsOrderAccuracy": 0.893,
+          "characterErrorRate": 0.001
+        },
+        "text": {
+          "cellAccuracy": 0.926,
+          "cellTextAccuracy": 0.98,
+          "cellNeighbourAccuracy": 0.932,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.911,
+          "orderAccuracy": 0.97,
+          "allPairsOrderAccuracy": 0.971,
+          "characterErrorRate": 0.001
+        }
+      }
+    },
+    "paddle": {
+      "status": "succeeded",
+      "pagesSucceeded": 40,
+      "pages": 40,
+      "runSha256": "730990ed8a07fca1c3ed2a5e02db74adecf7b92dde6b2aafc12ceabb9382984b",
+      "modelLockSha256": "18a84e8a2ffc37d0d30a2dfeb2709afbcf7f9a694869eb1501d8b318310d46a2",
+      "note": "PP-StructureV3 with doc orientation/unwarping OFF (UVDoc disabled): skew results reflect this config, not the engine ceiling. adapterSha256 in run.json was hashed at run end and records a later edit; the adapter actually used is 2865bf770fbbbcda70f54a506b2946744988b54f0d2c6efda3e228e486f3ad3f (default profile kwargs unchanged).",
+      "pageSec": {
+        "median": 62.0,
+        "max": 86.6
+      },
+      "totalMin": 41.6,
+      "peakWorkingSetGiB": 11.79,
+      "provisionalScore": {
+        "columns": {
+          "cellAccuracy": null,
+          "cellTextAccuracy": null,
+          "cellNeighbourAccuracy": null,
+          "numberAccuracy": null,
+          "sourceAccuracy": 1.0,
+          "orderAccuracy": 0.984,
+          "allPairsOrderAccuracy": 0.984,
+          "characterErrorRate": 0.001
+        },
+        "merged_table": {
+          "cellAccuracy": 0.978,
+          "cellTextAccuracy": 1.0,
+          "cellNeighbourAccuracy": 0.973,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.993,
+          "orderAccuracy": 0.997,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.001
+        },
+        "mixed": {
+          "cellAccuracy": 0.743,
+          "cellTextAccuracy": 1.0,
+          "cellNeighbourAccuracy": 0.836,
+          "numberAccuracy": 0.954,
+          "sourceAccuracy": 0.896,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.008
+        },
+        "scan": {
+          "cellAccuracy": 0.703,
+          "cellTextAccuracy": 0.932,
+          "cellNeighbourAccuracy": 0.736,
+          "numberAccuracy": 0.924,
+          "sourceAccuracy": 0.945,
+          "orderAccuracy": 0.913,
+          "allPairsOrderAccuracy": 0.924,
+          "characterErrorRate": 0.011
+        },
+        "skew": {
+          "cellAccuracy": 0.5,
+          "cellTextAccuracy": 0.912,
+          "cellNeighbourAccuracy": 0.69,
+          "numberAccuracy": 0.897,
+          "sourceAccuracy": 0.85,
+          "orderAccuracy": 0.731,
+          "allPairsOrderAccuracy": 0.837,
+          "characterErrorRate": 0.083
+        },
+        "text": {
+          "cellAccuracy": 1.0,
+          "cellTextAccuracy": 1.0,
+          "cellNeighbourAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.99,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.0
+        }
+      }
+    }
+  }
+}

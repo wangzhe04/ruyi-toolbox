@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-22",
+  "synthetic": true,
+  "independentBlindSet": false,
+  "manifestSha256": "04bd799090c4d7726beca5adfaf5d6263d6163dbb44ec109ce995257f4357df6",
+  "fontSha256": "9b1959db3b3abeb7efdaec26edf7dfe871a6039de8d614af7248575207be629e",
+  "dependencies": {
+    "reportlab": "4.4.9",
+    "pillow": "12.3.0"
+  },
+  "popplerVersion": "pdftoppm version 26.07.0\nCopyright 2005-2026 The Poppler Developers - http://poppler.freedesktop.org\nCopyright 1996-2011, 2022 Glyph & Cog, LLC",
+  "pages": 60,
+  "dev": 40,
+  "holdout": 20,
+  "pilot": 12,
+  "pdfPageCountChecked": 60,
+  "textLayerPresenceChecked": 60,
+  "pilotVisuallyReviewed": 12,
+  "cpu": "Intel Core Ultra 9 275HX",
+  "logicalProcessors": 24,
+  "physicalMemoryBytes": 68097724416,
+  "platform": "Windows-11-10.0.26200-SP0"
+}

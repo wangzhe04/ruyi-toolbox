@@ -27,6 +27,8 @@
 
 ## 文档
 
+- [`evaluation/document-parser/`](evaluation/document-parser/README.md) —— D0 文档评测开发工具：合成样本、哈希校验、保守评分与安装探针（非可用 MCP，正式选型待实测）
+
 - [`docs/00-component-registry.md`](docs/00-component-registry.md) —— 组件怎么向如意登记自己（两仓之间唯一的对接面）
 - [`docs/01-asr-shim-plan.md`](docs/01-asr-shim-plan.md) —— asr-shim 的方案与交办单
 - [`docs/02-asr-stream-plan.md`](docs/02-asr-stream-plan.md) —— asr-stream 的方案（接口与主仓第 130 波对齐）
