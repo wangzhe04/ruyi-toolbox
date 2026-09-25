@@ -22,6 +22,19 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_INVALID_PARAMETER = 87
 
 
+def _is_zombie(pid: int) -> bool:
+    """Linux：进程已退出、只是还没被它的父进程收尸（状态 Z）时 os.kill(pid, 0) 仍然成功，
+    但它已经不会再做任何事了，看门狗该把它当死。读不到 /proc（macOS 等）就当不是僵尸。"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            stat = f.read()
+    except OSError:
+        return False
+    # 第 2 列是带括号的进程名（里面可能有空格与括号），状态字在最后一个 ')' 之后。
+    tail = stat[stat.rfind(b")") + 1:].split()
+    return bool(tail) and tail[0] == b"Z"
+
+
 def pid_alive(pid: int) -> bool:
     """那个 pid 还在不在。判不准的时候一律当作「还在」—— 宁可多活一会儿，不可误杀自己。"""
     try:
@@ -34,7 +47,7 @@ def pid_alive(pid: int) -> bool:
         return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
-        return True
+        return not _is_zombie(pid)
     except ProcessLookupError:
         return False
     except PermissionError:
