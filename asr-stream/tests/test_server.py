@@ -31,8 +31,12 @@ class ServerTest(unittest.TestCase):
 
     def test_binds_loopback_only(self):
         self.assertEqual(self.httpd.server_address[0], BIND_HOST)
+        lan_ip = socket.gethostbyname(socket.gethostname())
+        if lan_ip.startswith("127."):
+            # 很多 Linux（Debian/容器）把主机名解析到 127.0.x.1，那就没有「非回环地址」可以反证。
+            self.skipTest(f"主机名解析到回环地址 {lan_ip}，无法反证只绑回环")
         with self.assertRaises(OSError):
-            s = socket.create_connection((socket.gethostbyname(socket.gethostname()), self.port), timeout=0.5)
+            s = socket.create_connection((lan_ip, self.port), timeout=0.5)
             s.close()
 
     def test_health(self):
