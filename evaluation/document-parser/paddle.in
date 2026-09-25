@@ -1,0 +1,3 @@
+# D0 candidate pins, not a release lock.
+paddleocr[doc-parser]==3.7.0
+paddlepaddle==3.3.1

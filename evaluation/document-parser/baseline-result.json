@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "engine": "pypdf-text-only",
+  "version": "6.10.0",
+  "python": "3.12.14",
+  "manifestSha256": "04bd799090c4d7726beca5adfaf5d6263d6163dbb44ec109ce995257f4357df6",
+  "qualityScored": false,
+  "releaseQualified": false,
+  "pages": [
+    {
+      "id": "text-01",
+      "sourceSha256": "52847ba58d678e5df5ebb87cbd6ecb68d78cf541b8ceaf4e91505413722b5aed",
+      "page": 1,
+      "status": "succeeded",
+      "reason": null,
+      "textChars": 207,
+      "elapsedSec": 0.0042984000174328685
+    },
+    {
+      "id": "text-02",
+      "sourceSha256": "f38f9df6436a207552aeaf614b4009fb3254b7467a37b3a1b5285f3034a2949b",
+      "page": 1,
+      "status": "succeeded",
+      "reason": null,
+      "textChars": 208,
+      "elapsedSec": 0.002590599993709475
+    },
+    {
+      "id": "scan-01",
+      "sourceSha256": "1de961ce5bb46a92d7a6b325fc80fb1e2645d08489e3b17548e13441781fe23f",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0009526999783702195
+    },
+    {
+      "id": "scan-02",
+      "sourceSha256": "ee991eea788cf33fb1999ce2c6ac27afd60ba087faf3c1a8ff8a9a610c00127d",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0010441999766044319
+    },
+    {
+      "id": "skew-01",
+      "sourceSha256": "b1eda614cb6ac614ada64ef312d26ce1cd48bad067c41a5ffb1b3cd03d3b42ac",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.001042800024151802
+    },
+    {
+      "id": "skew-02",
+      "sourceSha256": "af8897e2c690d4ac0e0ac1c52e27b41aef4841581236596b6b7819ebab2e0975",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.003062899981159717
+    },
+    {
+      "id": "columns-01",
+      "sourceSha256": "95ea48cea95bebf1d6ddf5656284fdd620d023ef4ee3ffb629d0483873aec6a6",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.001122899993788451
+    },
+    {
+      "id": "columns-02",
+      "sourceSha256": "e9b274684e74791e42eb2c41dcc188a633426b055d4d2858a3faa8ceec625498",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0009971000254154205
+    },
+    {
+      "id": "merged_table-01",
+      "sourceSha256": "f51ddbfb8a7aa3457b446fe7ef95b85a1d3c32a3afdea6c613332ed0ded635b9",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0011348000261932611
+    },
+    {
+      "id": "merged_table-02",
+      "sourceSha256": "9a7489dd1c0d9121a935deb6cd371be1f23ff59af96a0e11bc7a7b2cf694eacd",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0017384999664500356
+    },
+    {
+      "id": "mixed-01",
+      "sourceSha256": "93691e54b2c7a1268f572fe47af78bd44bf2e399742ae5fc828b39eb97acd2b5",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0010634000063873827
+    },
+    {
+      "id": "mixed-02",
+      "sourceSha256": "dc1db635f98a95278af72cf74bfec4ee551728d4da2e8d34b1c6c238c9371e3b",
+      "page": 1,
+      "status": "unsupported",
+      "reason": "no_text_layer",
+      "textChars": 0,
+      "elapsedSec": 0.0011208999785594642
+    }
+  ]
+}

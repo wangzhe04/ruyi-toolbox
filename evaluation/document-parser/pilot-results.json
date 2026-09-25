@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-24",
+  "corpus": "synthetic-v1 (manifest below); pilot = 12 dev pages",
+  "threads": 4,
+  "hardware": "Intel Core Ultra 9 275HX, 24 logical, 64 GB, CPU only",
+  "networkGuard": "Python audit hook only; OS-level offline NOT verified",
+  "alignment": "machine proposal by align_candidate.py, NOT reviewed; scores are PROVISIONAL, not decision evidence",
+  "runs": {
+    "docling": {
+      "status": "succeeded",
+      "pagesSucceeded": 12,
+      "pages": 12,
+      "topLevelVersion": {
+        "docling": "2.129.0"
+      },
+      "runSha256": "e0dde9810a064c44c2a0217b859ca7e2b2e22b0c2e6b927c0f9960b87c091d7c",
+      "modelLockSha256": "216b69664d03ae0230eea166ee2a326a5623733945601abe2311c6383a0dbcbf",
+      "adapterSha256": "3710951b29bc4964194e21096b8e47ec98885ae10af421a9d40005e2ec5a05d8",
+      "initializationSec": 7.04,
+      "totalSec": 49.1,
+      "pageSec": {
+        "min": 1.73,
+        "median": 3.43,
+        "max": 5.11
+      },
+      "peakWorkingSetGiB": 1.88,
+      "runKind": "single run, first run in a fresh process; not the 3 cold / 10 warm benchmark",
+      "provisionalScore": {
+        "columns": {
+          "cellAccuracy": null,
+          "numberAccuracy": null,
+          "sourceAccuracy": 0.111,
+          "orderAccuracy": 0.941,
+          "allPairsOrderAccuracy": 0.817,
+          "characterErrorRate": 0.004
+        },
+        "merged_table": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.947,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.005
+        },
+        "mixed": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.95,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.004
+        },
+        "scan": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.944,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.006
+        },
+        "skew": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.0,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.017
+        },
+        "text": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.917,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.0
+        }
+      }
+    },
+    "paddle": {
+      "status": "succeeded",
+      "pagesSucceeded": 12,
+      "pages": 12,
+      "topLevelVersion": {
+        "paddleocr": "3.7.0",
+        "paddlepaddle": "3.3.1"
+      },
+      "runSha256": "6628e4ec7dbae4510027fdd330ba54d734538361623666871ccee6b791c995a2",
+      "modelLockSha256": "18a84e8a2ffc37d0d30a2dfeb2709afbcf7f9a694869eb1501d8b318310d46a2",
+      "adapterSha256": "2865bf770fbbbcda70f54a506b2946744988b54f0d2c6efda3e228e486f3ad3f",
+      "initializationSec": 5.38,
+      "totalSec": 534.8,
+      "pageSec": {
+        "min": 40.09,
+        "median": 44.28,
+        "max": 46.66
+      },
+      "peakWorkingSetGiB": 11.66,
+      "runKind": "single run, first run in a fresh process; not the 3 cold / 10 warm benchmark",
+      "provisionalScore": {
+        "columns": {
+          "cellAccuracy": null,
+          "numberAccuracy": null,
+          "sourceAccuracy": 0.111,
+          "orderAccuracy": 0.941,
+          "allPairsOrderAccuracy": 0.817,
+          "characterErrorRate": 0.0
+        },
+        "merged_table": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 1.0,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.0
+        },
+        "mixed": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.9,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.0
+        },
+        "scan": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 1.0,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.0
+        },
+        "skew": {
+          "cellAccuracy": 0.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 0.0,
+          "orderAccuracy": 0.706,
+          "allPairsOrderAccuracy": 0.843,
+          "characterErrorRate": 0.0
+        },
+        "text": {
+          "cellAccuracy": 1.0,
+          "numberAccuracy": 1.0,
+          "sourceAccuracy": 1.0,
+          "orderAccuracy": 1.0,
+          "allPairsOrderAccuracy": 1.0,
+          "characterErrorRate": 0.0
+        }
+      }
+    }
+  },
+  "manifestSha256": "04bd799090c4d7726beca5adfaf5d6263d6163dbb44ec109ce995257f4357df6"
+}
