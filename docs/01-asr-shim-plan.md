@@ -115,7 +115,7 @@ HTTP 层用标准库 `http.server`（26 号文原定；依赖越少，用户装�
 真机冒烟（本机有 GPU，**必须真跑**，结果写进 README「实测」一节）：
 - `install.ps1` 从零装通；`download-model.ps1` 把 0.6B 拉下来；`start.ps1` 起服务。
 - 用一段中文、一段英文 WAV 各转一次，记录：首发（含加载）耗时、热态耗时、显存占用、文本是否正确。
-  中文样例可用 `C:\Users\87179\AppData\Local\Temp\claude\E--Claude-ruyi-workbench-oss\4a963f73-3b58-466d-aa2d-55f38c48a5d4\scratchpad\probe.wav`
+  中文样例可用本地临时目录里生成的 `probe.wav`
   （Windows 语音合成的「你好，今天下午三点开会，请帮我记一下。」16 kHz 单声道）。**样例音频不要提交进仓库**，
   提交一个生成样例的脚本即可。
 - 用 `curl`／Python 按 §2.1 的字段形状打一发真 multipart，确认回体能被主仓那段解析代码接受（有字符串 `text`）。
@@ -125,7 +125,7 @@ HTTP 层用标准库 `http.server`（26 号文原定；依赖越少，用户装�
 
 ## 3. 纪律（硬性）
 
-- **只在 `E:\Claude\ruyi-toolbox` 里干活。** 不改 `E:\Claude\ruyi-workbench-oss` 的任何文件（可以读）；不碰用户正在跑的
+- **只在 ruyi-toolbox 仓库目录里干活。** 不改 ruyi-workbench-oss 仓库的任何文件（可以读）；不碰用户正在跑的
   如意（127.0.0.1:8765）；不读写 `~/.win-claude-workbench`；不动系统 Python 的全局包；不装系统级软件（ffmpeg 等）。
 - venv、模型、缓存都放在仓库目录内且被 `.gitignore` 挡住（`.venv/`、`models/`），**绝不提交模型权重与样例音频**。
 - 如实汇报：跑不通的写跑不通和原因，不许写成通过；没真跑的不许写「实测」。数字只写量到的。

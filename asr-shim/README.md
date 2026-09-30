@@ -13,7 +13,7 @@
 ## 三步装好
 
 ```powershell
-cd E:\Claude\ruyi-toolbox\asr-shim
+cd <克隆目录>\asr-shim
 
 # 1) 建环境、装 PyTorch（按显卡挑构建）与依赖，最后自检
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1

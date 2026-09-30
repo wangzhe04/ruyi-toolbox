@@ -27,10 +27,10 @@
   "name": "本地语音识别（Qwen3-ASR）",
   "version": "0.1.0",
   "run": {
-    "command": "E:\\Claude\\ruyi-toolbox\\asr-shim\\.venv\\Scripts\\python.exe",
+    "command": "C:\\path\\to\\ruyi-toolbox\\asr-shim\\.venv\\Scripts\\python.exe",
     "args": ["-m", "ruyi_asr_shim"],
-    "cwd": "E:\\Claude\\ruyi-toolbox\\asr-shim",
-    "env": { "RUYI_ASR_MODEL_DIR": "E:\\Claude\\ruyi-toolbox\\asr-shim\\models\\Qwen3-ASR-0.6B" }
+    "cwd": "C:\\path\\to\\ruyi-toolbox\\asr-shim",
+    "env": { "RUYI_ASR_MODEL_DIR": "C:\\path\\to\\ruyi-toolbox\\asr-shim\\models\\Qwen3-ASR-0.6B" }
   },
   "registeredAt": "2026-09-21T00:00:00.000Z"
 }
