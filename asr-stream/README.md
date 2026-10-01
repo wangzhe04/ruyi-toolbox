@@ -8,7 +8,9 @@
 
 - 只绑 `127.0.0.1`；音频只在内存里；日志不记文本。
 - **CPU 推理、不用显卡、不用 torch**；模型启动即加载、常驻（几十 MB 内存）。
-- 中英双语（缺省模型）；热词可配。
+- 中英双语（缺省模型）；热词可配。如意会把「语音词库」里你自己的词在开会话时作为热词带过来。
+  英文热词要按模型的 BPE 切：模型目录里得有 `bpe.vocab`（GitHub 包自带；HF 镜像装的重跑一次 `download-model.ps1` 会补），
+  组件自己探测切词口径（`cjkchar+bpe`）并把英文转成模型词表的大写，缺了 `bpe.vocab` 只是英文热词不生效、中文照常。
 
 ## 三步装好
 
@@ -69,7 +71,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\download-model.ps1 -Source hf
 | `RUYI_ASR_STREAM_MODEL` | `zipformer-bilingual-zh-en` | 如意里显示的模型名 |
 | `RUYI_ASR_STREAM_THREADS` | `2` | onnxruntime 线程数 |
 | `RUYI_ASR_STREAM_RULE1_SEC` / `RULE2_SEC` / `RULE3_SEC` | `2.0` / `0.8` / `20` | 端点规则：一直没说话的静音／说过话之后的静音／单句最长 |
-| `RUYI_ASR_STREAM_HOTWORDS_FILE` | 空 | 热词文件（一行一个） |
+| `RUYI_ASR_STREAM_HOTWORDS_FILE` | 空 | 热词文件（一行一个；sherpa 原样读，英文请写大写） |
 | `RUYI_ASR_STREAM_DECODING` | `modified_beam_search` | **131a**：缺省 beam search（4 条路径）。评测里比 greedy 在嘈杂条件下少 13% 错字、每块耗时不变；想回 `greedy_search` 就设它 |
 | `RUYI_ASR_STREAM_OFFLINE_MODEL_DIR` | 空 | **131c**：SenseVoice 目录（`tokens.txt` + `model(.int8).onnx`）。给了就开 `/v1/audio/transcriptions`，登记时同时提供 `asr` |
 | `RUYI_ASR_STREAM_OFFLINE_MODEL` / `OFFLINE_THREADS` | `sensevoice-small` / `2` | 如意里显示的离线模型名／它的线程数 |
