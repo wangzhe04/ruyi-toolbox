@@ -68,3 +68,14 @@
   登记 `provides` 同时有 `asr-stream` 与 `asr`（`protocol: transcriptions`，模型名 `sensevoice-small`）。`download-model.ps1` 缺省一并下载并登记；`-NoOffline` 跳过。
   离线模型坏了不拖死流式那条路：记一行、照常起、端点回 409。评测：一句 4.5 s 音频 0.25 s，错字率 0.72/0.87/2.74（clean/noisy/hard），接近 Qwen3-ASR-0.6B。
 - 不做：换第一遍模型（纯中文 2025 模型对夹英文术语的话更差；Paraformer 12/40 丢尾字）、热词默认开（没用）。
+
+## 9. 语音词库补记（2026-10-01，主仓 59 号文）
+
+如意的「语音词库」开会话时把用户自己的词当会话热词带过来（原厂通用词不带）。修前热词在产品里对英文是坏的，本次一并修：
+
+- `engine.detect_modeling_unit`：按模型目录探测热词的切词口径 —— 有 `bpe.vocab` → `cjkchar+bpe`（纯英文 BPE → `bpe`），没有 → sherpa 缺省的 `cjkchar`
+  （中文热词照常，英文切不出 token、被静默丢掉；修前产品里一直是这种）。词表只有大写英文（缺省双语模型）时，热词里的英文先转大写。
+  老 sherpa-onnx 不认 `modeling_unit`/`bpe_vocab` 时照起、只是英文热词不生效。
+- `_clean_hotwords`：词内空白收成一个空格（修前删光：`PULL REQUEST` → `PULLREQUEST`，切出来是另一串 token）。
+- `download-model.ps1`：补下 `bpe.vocab`（HF 镜像那条路早先只下四个文件；老装好的目录重跑一次就补上，下不到不拦）。
+- 测试：`tests/test_hotwords.py`（假 sherpa 模块，看构造参数与 `create_stream` 收到的字符串）。

@@ -191,16 +191,63 @@ def _ms(samples: int) -> int:
 
 
 def _clean_hotwords(words) -> list[str]:
+    """会话热词清洗：≤ 200 条、每条 ≤ 40 字、去不可打印字符、去重。
+    词内的空白收成一个空格而不是删光 —— sherpa 按空格切词，「PULL REQUEST」删成「PULLREQUEST」
+    就成了另一串 BPE token，偏置的根本不是模型会出的那串。"""
     out: list[str] = []
     seen: set[str] = set()
     for w in (words or [])[:200]:
         if not isinstance(w, str):
             continue
-        s = "".join(ch for ch in w.strip() if ch.isprintable() and not ch.isspace())[:40]
+        s = " ".join("".join(ch for ch in part if ch.isprintable()) for part in w.split())[:40].strip()
         if s and s not in seen:
             seen.add(s)
             out.append(s)
     return out
+
+
+def detect_modeling_unit(model_dir: str, tokens_path: str) -> tuple[str, str, bool]:
+    """热词要先按模型自己的建模单元切成 token，sherpa 才认得。返回 (modeling_unit, bpe_vocab, upper_latin)。
+
+    sherpa-onnx 的 modeling_unit 缺省是 cjkchar：中文逐字切，英文整词当一个 token 去查 tokens.txt ——
+    中英双语 zipformer 的英文是 BPE（「▁DE」「BUG」这种），整词查不到，英文热词就被静默丢掉。
+    所以：模型目录里有 bpe.vocab 就用它（有中文 token → cjkchar+bpe，纯英文 → bpe）；没有就只能 cjkchar（中文照常）。
+    upper_latin：tokens 里的英文字母只有大写（缺省双语模型就是）→ 热词里的英文要先转大写，否则切出来的 token 对不上。
+    """
+    has_cjk = False
+    has_upper = False
+    has_lower = False
+    try:
+        with open(tokens_path, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()   # 一行「符号 编号」；符号本身不含空白
+                sym = parts[0] if parts else ""
+                if sym.startswith("<") and sym.endswith(">"):
+                    continue           # <blk> <unk> <sos/eos> 这类特殊符号不算词表里的英文
+                for ch in sym:
+                    if "一" <= ch <= "鿿":
+                        has_cjk = True
+                    elif "A" <= ch <= "Z":
+                        has_upper = True
+                    elif "a" <= ch <= "z":
+                        has_lower = True
+    except OSError:
+        pass
+    vocab = os.path.join(model_dir, "bpe.vocab") if model_dir else ""
+    if not (vocab and os.path.isfile(vocab)):
+        vocab = ""
+    if vocab:
+        unit = "cjkchar+bpe" if has_cjk else "bpe"
+    else:
+        unit = "cjkchar"
+    return unit, vocab, has_upper and not has_lower
+
+
+def hotwords_for_model(hotwords: str, upper_latin: bool) -> str:
+    """会话热词（换行分隔）按模型口味整形：词表只有大写英文时把 ASCII 小写字母转大写，其余原样。"""
+    if not upper_latin:
+        return hotwords
+    return "".join(ch.upper() if "a" <= ch <= "z" else ch for ch in hotwords)
 
 
 def pcm16_to_float32(pcm16: bytes) -> np.ndarray:
@@ -285,13 +332,33 @@ class SherpaBackend:
         if hotwords_file:
             kwargs["hotwords_file"] = hotwords_file
             kwargs["hotwords_score"] = float(hotwords_score)
-        self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(**kwargs)
+        # 热词的切词口径（detect_modeling_unit 头注）：修前不传 → sherpa 缺省 cjkchar → 双语模型的英文热词全被丢掉。
+        unit, vocab, upper = detect_modeling_unit(model_dir, files["tokens"])
+        self.modeling_unit, self.bpe_vocab, self.upper_latin = unit, vocab, upper
+        if decoding == "modified_beam_search":
+            kwargs["modeling_unit"] = unit
+            if vocab:
+                kwargs["bpe_vocab"] = vocab
+        try:
+            self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(**kwargs)
+        except TypeError:
+            if "modeling_unit" not in kwargs:
+                raise
+            # 太老的 sherpa-onnx 不认这两个参数：照旧起（中文热词照常），只是英文热词仍不生效。
+            LOG.warning("这个 sherpa-onnx 不认 modeling_unit/bpe_vocab，英文热词不会生效（升级 sherpa-onnx 即可）")
+            kwargs.pop("modeling_unit", None)
+            kwargs.pop("bpe_vocab", None)
+            self.modeling_unit, self.bpe_vocab = "cjkchar", ""
+            self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(**kwargs)
         self.decoding = decoding
+        if decoding == "modified_beam_search" and not self.bpe_vocab and unit == "cjkchar" and upper:
+            LOG.warning("模型目录里没有 bpe.vocab：中文热词照常，英文热词切不出 token、不会生效（重跑 download-model.ps1 补上）")
+        LOG.info("热词切词：modeling_unit=%s bpe_vocab=%s 英文转大写=%s", self.modeling_unit, "有" if self.bpe_vocab else "无", upper)
 
     def create_stream(self, hotwords: str):
         if hotwords and self.decoding == "modified_beam_search":
             try:
-                return self.recognizer.create_stream(hotwords)
+                return self.recognizer.create_stream(hotwords_for_model(hotwords, self.upper_latin))
             except TypeError:
                 pass
         return self.recognizer.create_stream()

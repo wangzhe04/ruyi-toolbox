@@ -8,7 +8,8 @@
   走 HuggingFace 镜像逐文件下（尊重 HF_ENDPOINT，缺省 https://hf-mirror.com）。
 
   缺省模型：sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20（中英双语，int8 编码器约 174 MB）。
-  只要 tokens.txt + encoder/decoder/joiner 三个 onnx；解压包里的 test_wavs 等顺手留着，不影响。
+  只要 tokens.txt + encoder/decoder/joiner 三个 onnx，外加 bpe.vocab（英文热词切词用，缺了只影响英文热词）；
+  解压包里的 test_wavs 等顺手留着，不影响。
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\scripts\download-model.ps1
@@ -90,6 +91,20 @@ if (-not (Test-Path (Join-Path $Dest "tokens.txt"))) {
 }
 Write-Host ""
 Write-Host ("模型就位：" + $Dest) -ForegroundColor Green
+
+# 热词要按模型自己的 BPE 切英文（engine.detect_modeling_unit）：缺了 bpe.vocab，中文热词照常、英文热词切不出 token。
+# GitHub 包里本来就有；HF 镜像那条路早先只下四个文件，老装好的目录也在这里补一次。只有几十 KB，下不到也不拦。
+if (-not (Test-Path (Join-Path $Dest "bpe.vocab"))) {
+    $hfBase = $env:HF_ENDPOINT
+    if ([string]::IsNullOrWhiteSpace($hfBase)) { $hfBase = "https://hf-mirror.com" }
+    $vocabUrl = $hfBase.TrimEnd("/") + "/csukuangfj/" + $Model + "/resolve/main/bpe.vocab"
+    Write-Host "补下 bpe.vocab（英文热词用）…"
+    & curl.exe -L --fail --retry 2 --retry-delay 2 -o (Join-Path $Dest "bpe.vocab") $vocabUrl
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item -LiteralPath (Join-Path $Dest "bpe.vocab") -Force -ErrorAction SilentlyContinue
+        Write-Host "bpe.vocab 没下到：中文热词照常，英文热词不生效（换个 HF_ENDPOINT 再跑一次本脚本即可补上）。" -ForegroundColor Yellow
+    }
+}
 
 # ── 131c：离线整句识别（SenseVoice）——同一进程多一条 /v1/audio/transcriptions，如意里多一个不要显卡的「整段识别」候选
 $offlineDir = ""
