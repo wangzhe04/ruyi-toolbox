@@ -82,6 +82,14 @@ def make_wav(seconds: float = 0.5, sr: int = 16000, channels: int = 1, width: in
     return buf.getvalue()
 
 
+def wav_with_rate(sr: int, n: int = 100) -> bytes:
+    """头里写任意采样率（含 0 这种 wave 模块写不出来的非法值）的 16 bit 单声道 WAV：先按 16 kHz 写，再改头。"""
+    raw = bytearray(make_wav(n / 16000.0))
+    raw[24:28] = int(sr).to_bytes(4, "little")
+    raw[28:32] = (int(sr) * 2).to_bytes(4, "little")
+    return bytes(raw)
+
+
 def build_multipart(fields: dict, files: list[tuple], boundary: str = "----ruyiTestBoundary1234"):
     """按如意（Node undici FormData）那边的形状拼：先若干文本字段，最后 file 段带 filename 与 content-type。
 

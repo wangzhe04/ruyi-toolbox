@@ -50,6 +50,28 @@ class WavDecodeTest(unittest.TestCase):
         self.assertEqual(len(decode_wav_to_mono16k(wav_bytes(stereo, channels=2)).samples), 16000)
         self.assertEqual(len(decode_wav_to_mono16k(wav_bytes(speech(1.0)[:16000], sr=8000)).samples), 16000)
 
+    def test_sample_rate_whitelist(self):
+        """修前：头里采样率 = 1 Hz 时线性重采样放大 16000 倍（2 万字节吃掉 3 GB 内存）；= 0 时除零。"""
+        for sr in (0, 1, 7999, 192001, 1000000):
+            with self.assertRaises(UnsupportedAudioError, msg="sr=%d" % sr):
+                decode_wav_to_mono16k(wav_with_rate(speech(0.01), sr))
+        self.assertEqual(decode_wav_to_mono16k(wav_with_rate(speech(0.1), 8000)).sample_rate, 16000)
+        self.assertEqual(decode_wav_to_mono16k(wav_with_rate(speech(0.1), 192000)).sample_rate, 16000)
+
+    def test_resample_output_is_capped(self):
+        from ruyi_asr_stream import audio
+
+        saved = audio.MAX_AUDIO_SEC
+        audio.MAX_AUDIO_SEC = 2
+        try:
+            with self.assertRaises(UnsupportedAudioError):
+                audio.resample_linear(np.zeros(8000 * 3, dtype=np.float32), 8000, 16000)
+            with self.assertRaises(UnsupportedAudioError):
+                decode_wav_to_mono16k(wav_with_rate(speech(3.0)[: 8000 * 2 * 3], 8000))   # 8 kHz 下 3 秒
+            self.assertEqual(len(audio.resample_linear(np.zeros(8000, dtype=np.float32), 8000, 16000)), 16000)
+        finally:
+            audio.MAX_AUDIO_SEC = saved
+
     def test_non_wav_rejected(self):
         with self.assertRaises(UnsupportedAudioError):
             decode_wav_to_mono16k(b"\x1aE\xdf\xa3webm-garbage")
@@ -128,6 +150,12 @@ class OfflineRouteTest(unittest.TestCase):
             self.assertTrue(j["error"]["message"])
         st, _, _ = self.c.request("GET", "/health")
         self.assertEqual(st, 200, "坏音频不该带垮服务")
+
+    def test_bad_sample_rate_is_415(self):
+        for sr in (0, 1):
+            body, ctype = multipart_body(wav_with_rate(speech(0.01), sr))
+            st, j, _ = self.c.request("POST", "/v1/audio/transcriptions", body, {"Content-Type": ctype})
+            self.assertEqual((st, j["error"]["type"]), (415, "unsupported_media_type"), "sr=%d" % sr)
 
     def test_stream_route_still_works_alongside(self):
         st, j, _ = self.c.open()

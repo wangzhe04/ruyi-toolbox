@@ -20,7 +20,7 @@ from ruyi_asr_shim.audio import TEMP_PREFIX
 from ruyi_asr_shim.engine import EngineManager
 from ruyi_asr_shim.server import BIND_HOST, MAX_UPLOAD_BYTES, Settings, build_server, pick_free_port
 
-from .helpers import FakeBackend, Recorder, build_multipart, make_wav
+from .helpers import FakeBackend, Recorder, build_multipart, make_wav, wav_with_rate
 
 
 class ServerFixture:
@@ -311,6 +311,14 @@ class TestTranscribe(unittest.TestCase):
             broken = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"garbage" * 4
             status, _h, body = s.transcribe(audio=broken)
             self.assertIn(status, (400, 415))
+
+    def test_bad_sample_rate_415(self):
+        """采样率头为 0 / 1：修前一个除零回 400、一个按 16000 倍放大重采样（大文件就是吃光内存）。"""
+        with ServerFixture() as s:
+            for sr in (0, 1):
+                status, _h, body = s.transcribe(audio=wav_with_rate(sr))
+                self.assertEqual((status, body["error"]["type"]), (415, "unsupported_media_type"), "sr=%d" % sr)
+            self.assertEqual(s.rec.loads, 0)
 
     def test_engine_error_is_human_envelope_500(self):
         with ServerFixture(raise_on_call=RuntimeError("CUDA out of memory")) as s:
