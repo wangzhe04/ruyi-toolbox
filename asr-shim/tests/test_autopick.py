@@ -14,6 +14,8 @@ from pathlib import Path
 from ruyi_asr_shim.autopick import AUTO_MODEL_NAME, CANDIDATES, by_name, catalog, free_vram_mb, installed, is_auto, looks_installed, normalize_prefer, pick
 from ruyi_asr_shim.registry import DIR_ENV, build_record, register, registration_path, self_check
 
+from .helpers import fake_python
+
 
 def make_model(root: str, dirname: str, complete: bool = True) -> str:
     d = os.path.join(root, dirname)
@@ -122,16 +124,29 @@ class AutoRegistryTest(unittest.TestCase):
         self.pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.root = os.path.join(self.tmp, "models")
         make_model(self.root, "Qwen3-ASR-0.6B-hf")
+        self.py = fake_python(os.path.join(self.tmp, "venv"))   # 自检会真 import 依赖；测试 venv 没 torch，用假解释器
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_self_check_auto(self):
-        self.assertTrue(self_check(sys.executable, self.pkg_root, "", self.root).ok)
+        self.assertTrue(self_check(self.py, self.pkg_root, "", self.root).ok)
         self.assertFalse(self_check(sys.executable, self.pkg_root, "", os.path.join(self.tmp, "nope")).ok)
         self.assertFalse(self_check(sys.executable, self.pkg_root, "", "models").ok)
         shutil.rmtree(os.path.join(self.root, "Qwen3-ASR-0.6B-hf"))
-        self.assertFalse(self_check(sys.executable, self.pkg_root, "", self.root).ok)
+        self.assertFalse(self_check(self.py, self.pkg_root, "", self.root).ok)
+
+    def test_self_check_auto_rejects_half_downloaded_size(self):
+        """auto 模式会把 models 目录里每份「看着装好」的尺寸都列进登记；其中一份半截（分片缺一块）也不许登记。"""
+        d = make_model(self.root, "Qwen3-ASR-1.7B-hf")
+        os.unlink(os.path.join(d, "model.safetensors"))
+        Path(d, "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}),
+            encoding="utf-8")
+        Path(d, "model-00001-of-00002.safetensors").write_bytes(b"x")
+        r = self_check(self.py, self.pkg_root, "", self.root)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("model-00002-of-00002.safetensors" in p for p in r.problems), r.problems)
 
     def test_record_shape_auto(self):
         rec = build_record(python_exe="C:\\py.exe", cwd="C:\\x", model_dir="", model_name="auto", port=8790, models_root="C:\\m")
@@ -152,7 +167,8 @@ class AutoRegistryTest(unittest.TestCase):
 
     def test_register_auto(self):
         out = io.StringIO()
-        self.assertEqual(register(model_dir="", model_name="auto", port=8790, env=self.env, out=out, models_root=self.root), 0)
+        self.assertEqual(register(model_dir="", model_name="auto", port=8790, env=self.env, out=out, models_root=self.root,
+                                  python_exe=self.py), 0)
         rec = json.loads(registration_path(self.env).read_text("utf-8"))
         self.assertEqual(rec["run"]["env"]["RUYI_ASR_MODELS_ROOT"], self.root)
         self.assertEqual(rec["provides"][0]["model"], AUTO_MODEL_NAME)

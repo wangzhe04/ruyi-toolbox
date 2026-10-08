@@ -1,6 +1,7 @@
 """向如意登记本组件（登记约定 docs/00-component-registry.md；与 asr-shim 同一模具）。
 
-register：先自检（解释器在、工作目录对、模型目录里有 tokens + encoder/decoder/joiner），过了才原子写登记文件。
+register：先自检（解释器在、用它真 import 得了依赖、工作目录对、模型目录里 tokens + encoder/decoder/joiner 都在且非零字节），
+过了才原子写登记文件。
 自检不过就【绝不】写：登记文件存在 = 如意会去执行它。
 """
 
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -19,6 +21,9 @@ SCHEMA = 1
 DISPLAY_NAME = "本地实时语音识别（流式，sherpa-onnx）"
 DIR_ENV = "RUYI_TOOLBOX_COMPONENTS_DIR"   # 测试用的改道口子；正式运行一律走用户主目录
 DEFAULT_PORT = 8791
+# 登记前用【登记里的那个解释器】真 import 一遍跑起来要的依赖（pyproject 的 dependencies）。
+IMPORT_CHECK = ("numpy", "sherpa_onnx")
+IMPORT_CHECK_TIMEOUT_SEC = 120
 
 
 def components_dir(env=None) -> Path:
@@ -46,12 +51,7 @@ def self_check(python_exe: str, cwd: str, model_dir: str, offline_model_dir: str
         if not os.path.isabs(offline_model_dir):
             problems.append("离线模型目录不是绝对路径：%r" % offline_model_dir)
         else:
-            try:
-                from .engine import resolve_offline_model_files  # noqa: PLC0415
-
-                resolve_offline_model_files(offline_model_dir)
-            except FileNotFoundError as exc:
-                problems.append(str(exc))
+            problems.extend(offline_model_problems(offline_model_dir))
     if not python_exe or not os.path.isabs(python_exe):
         problems.append("解释器不是绝对路径：%r" % python_exe)
     elif not os.path.isfile(python_exe):
@@ -67,13 +67,70 @@ def self_check(python_exe: str, cwd: str, model_dir: str, offline_model_dir: str
     elif not os.path.isabs(model_dir):
         problems.append("模型目录不是绝对路径：%r" % model_dir)
     else:
-        try:
-            from .engine import resolve_model_files  # noqa: PLC0415
-
-            resolve_model_files(model_dir)
-        except FileNotFoundError as exc:
-            problems.append(str(exc))
+        problems.extend(stream_model_problems(model_dir))
+    if python_exe and os.path.isabs(python_exe) and os.path.isfile(python_exe):
+        why = import_problem(python_exe, cwd)
+        if why:
+            problems.append(why)
     return CheckResult(problems)
+
+
+def stream_model_problems(model_dir: str) -> list[str]:
+    """流式模型目录下全了没有（download-model.ps1 的「已下载」判据也调它，同一口径）：
+    resolve_model_files 实际会挑中的 tokens / encoder / decoder / joiner 个个都在、非零字节。回空列表＝下全了。"""
+    from .engine import resolve_model_files  # noqa: PLC0415
+
+    try:
+        files = resolve_model_files(model_dir)
+    except FileNotFoundError as exc:
+        return [str(exc)]
+    return _empty_files_problem(files, ("tokens", "encoder", "decoder", "joiner"), model_dir)
+
+
+def offline_model_problems(model_dir: str) -> list[str]:
+    """离线（SenseVoice）模型目录下全了没有：会挑中的 tokens 与 model*.onnx 都在、非零字节。"""
+    from .engine import resolve_offline_model_files  # noqa: PLC0415
+
+    try:
+        files = resolve_offline_model_files(model_dir)
+    except FileNotFoundError as exc:
+        return [str(exc)]
+    return _empty_files_problem(files, ("tokens", "model"), model_dir)
+
+
+def _empty_files_problem(files: dict, keys: tuple, model_dir: str) -> list[str]:
+    empty = []
+    for k in keys:
+        try:
+            size = os.path.getsize(files[k])
+        except OSError:
+            size = 0
+        if size <= 0:
+            empty.append(os.path.basename(files[k]))
+    if not empty:
+        return []
+    return ["模型文件 %s 是 0 字节（下载或解压中断？）：%s —— 重跑 scripts/download-model.ps1" % ("、".join(empty), model_dir)]
+
+
+def import_problem(python_exe: str, cwd: str = "") -> str | None:
+    """用登记里的那个解释器（如意就用它起服务）在子进程里 import 一遍 IMPORT_CHECK。过了回 None，没过回一句人话。"""
+    mods = "、".join(IMPORT_CHECK)
+    try:
+        r = subprocess.run(
+            [python_exe, "-c", "import " + ", ".join(IMPORT_CHECK)],
+            cwd=cwd if cwd and os.path.isdir(cwd) else None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=IMPORT_CHECK_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return "解释器 %s 在 %d 秒内没 import 完依赖（%s）" % (python_exe, IMPORT_CHECK_TIMEOUT_SEC, mods)
+    except OSError as exc:
+        return "解释器 %s 跑不起来：%s" % (python_exe, exc)
+    if r.returncode != 0:
+        lines = [ln.strip() for ln in r.stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
+        why = lines[-1][:300] if lines else "退出码 %d" % r.returncode
+        return "解释器 %s 里 import 不了依赖（%s）：%s —— 先跑 scripts/install.ps1" % (python_exe, mods, why)
+    return None
 
 
 def build_record(*, python_exe: str, cwd: str, model_dir: str, model_name: str, port: int,

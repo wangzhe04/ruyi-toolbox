@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import threading
 
 import numpy as np
@@ -124,3 +125,33 @@ def start_server(manager, port: int):
     th = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     th.start()
     return httpd, th
+
+
+def fake_python(directory, *, exit_code: int = 0, stderr: str = "") -> str:
+    """假解释器：登记自检拿它跑 `-c "import …"`，退出码与 stderr 由测试定；收到的参数记在同目录的 args.txt。
+    POSIX 上是带 shebang 的 sh 脚本，Windows 上是 .cmd（CreateProcess 认得）。不碰真 venv、不需要 torch／sherpa-onnx。"""
+    os.makedirs(str(directory), exist_ok=True)
+    if os.name == "nt":
+        path = os.path.join(str(directory), "python.cmd")
+        lines = ["@echo off", 'echo %* > "%~dp0args.txt"']
+        if stderr:
+            lines.append("echo %s 1>&2" % stderr)
+        lines.append("exit /b %d" % exit_code)
+        content = "\r\n".join(lines) + "\r\n"
+    else:
+        path = os.path.join(str(directory), "python")
+        lines = ["#!/bin/sh", 'printf "%s\\n" "$*" > "$(dirname "$0")/args.txt"']
+        if stderr:
+            lines.append("echo '%s' 1>&2" % stderr)
+        lines.append("exit %d" % exit_code)
+        content = "\n".join(lines) + "\n"
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(content)
+    os.chmod(path, 0o755)
+    return path
+
+
+def fake_python_args(path: str) -> str:
+    """假解释器上一次收到的参数（一行）。"""
+    with open(os.path.join(os.path.dirname(path), "args.txt"), encoding="utf-8", errors="replace") as fh:
+        return fh.read()

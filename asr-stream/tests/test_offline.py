@@ -20,7 +20,7 @@ from ruyi_asr_stream.engine import OfflineTranscriber, SessionManager, normalize
 from ruyi_asr_stream.registry import DIR_ENV, build_record, register, registration_path, self_check
 from ruyi_asr_stream.server import Settings, pick_free_port
 
-from .helpers import Client, FakeBackend, speech, start_server
+from .helpers import Client, FakeBackend, fake_python, speech, start_server
 from .helpers_offline import FakeOffline, multipart_body, start_server_with_offline, wav_bytes, wav_with_rate
 
 
@@ -209,6 +209,7 @@ class OfflineRegistryTest(unittest.TestCase):
         os.makedirs(self.off_dir)
         for n in ("tokens.txt", "model.onnx", "model.int8.onnx"):
             Path(self.off_dir, n).write_bytes(b"x")
+        self.py = fake_python(os.path.join(self.tmp, "venv"))   # 自检会真 import 依赖；测试 venv 没 sherpa_onnx
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -234,18 +235,21 @@ class OfflineRegistryTest(unittest.TestCase):
         self.assertNotIn("RUYI_ASR_STREAM_OFFLINE_MODEL_DIR", rec2["run"]["env"])
 
     def test_self_check_validates_offline_dir_when_given(self):
-        self.assertTrue(self_check(sys.executable, self.pkg_root, self.stream_dir).ok)
-        self.assertTrue(self_check(sys.executable, self.pkg_root, self.stream_dir, self.off_dir).ok)
+        self.assertTrue(self_check(self.py, self.pkg_root, self.stream_dir).ok)
+        self.assertTrue(self_check(self.py, self.pkg_root, self.stream_dir, self.off_dir).ok)
         self.assertFalse(self_check(sys.executable, self.pkg_root, self.stream_dir, os.path.join(self.tmp, "nope")).ok)
         self.assertFalse(self_check(sys.executable, self.pkg_root, self.stream_dir, "relative/sv").ok)
+        Path(self.off_dir, "model.int8.onnx").write_bytes(b"")   # 优先挑中的 int8 是 0 字节 = 没下全
+        self.assertFalse(self_check(self.py, self.pkg_root, self.stream_dir, self.off_dir).ok)
 
     def test_register_with_offline(self):
         out = io.StringIO()
-        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=self.off_dir, env=self.env, out=out), 0)
+        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=self.off_dir, python_exe=self.py, env=self.env, out=out), 0)
         rec = json.loads(registration_path(self.env).read_text("utf-8"))
         self.assertEqual([p["type"] for p in rec["provides"]], ["asr-stream", "asr"])
         self.assertEqual(rec["run"]["env"]["RUYI_ASR_STREAM_OFFLINE_MODEL_DIR"], self.off_dir)
-        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=os.path.join(self.tmp, "nope"), env=self.env, out=io.StringIO()), 1)
+        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=os.path.join(self.tmp, "nope"), python_exe=self.py,
+                                  env=self.env, out=io.StringIO()), 1)
 
 
 if __name__ == "__main__":

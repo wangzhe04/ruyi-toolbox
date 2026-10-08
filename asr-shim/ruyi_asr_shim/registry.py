@@ -4,7 +4,7 @@
 会写的文件**；不碰如意的数据目录 `~/.win-claude-workbench`，也不写注册表、不写开机自启。
 
 两条纪律（约定 §2 第 4 条）：
-1. 「登记文件存在＝如意会去执行它」——所以先自检（解释器在、包能 import、模型目录有货）
+1. 「登记文件存在＝如意会去执行它」——所以先自检（解释器在、用它真 import 得了依赖、模型文件下全了）
    再写；自检不过就不写，并在 stderr 说清哪一条不过。
 2. 原子写：同目录临时文件 + os.replace。半截的 JSON 会让如意启动时看到一个坏文件。
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -25,6 +26,10 @@ SCHEMA = 1
 DISPLAY_NAME = "本地语音识别（Qwen3-ASR）"
 # 测试用的改道口子（只有测试会设；正式运行一律走用户主目录）。
 DIR_ENV = "RUYI_TOOLBOX_COMPONENTS_DIR"
+# 登记前用【登记里的那个解释器】真 import 一遍跑起来要的依赖：pyproject 里转写真会 import 的 numpy、transformers，
+# 加上 install.ps1 按显卡另装的 torch（不写在 pyproject 里）。soundfile 缺了只是少几种格式，不拦。
+IMPORT_CHECK = ("numpy", "transformers", "torch")
+IMPORT_CHECK_TIMEOUT_SEC = 180   # 冷盘上第一次 import torch 能要几十秒
 
 
 def components_dir(env=None) -> Path:
@@ -60,7 +65,7 @@ def self_check(python_exe: str, cwd: str, model_dir: str, models_root: str = "")
         problems.append("工作目录里没有 ruyi_asr_shim 包：%s" % cwd)
 
     if models_root:
-        # auto 模式：不看单个目录，看 models 根目录里有没有至少一份下全的候选
+        # auto 模式：models 根目录里至少一份下全的候选；登记会把每份「看着装好」的尺寸都列进清单，所以每份都得真下全
         from .autopick import installed  # noqa: PLC0415
 
         if not os.path.isabs(models_root):
@@ -69,21 +74,83 @@ def self_check(python_exe: str, cwd: str, model_dir: str, models_root: str = "")
             problems.append("models 目录不存在：%s" % models_root)
         elif not installed(models_root):
             problems.append("models 目录里没有下全的 Qwen3-ASR（要 Qwen3-ASR-0.6B-hf 或 Qwen3-ASR-1.7B-hf，含 config.json 与权重）：%s" % models_root)
-        return CheckResult(ok=not problems, problems=problems)
-
-    if not model_dir:
+        else:
+            for c in installed(models_root):
+                problems.extend(model_dir_problems(os.path.join(models_root, c.dirname)))
+    elif not model_dir:
         problems.append("没有指定模型目录（--model-dir 或 RUYI_ASR_MODEL_DIR）；"
                         "先跑 scripts/download-model.ps1 把模型拉下来")
-    elif not os.path.isdir(model_dir):
-        problems.append("模型目录不存在：%s" % model_dir)
-    elif not os.path.isfile(os.path.join(model_dir, "config.json")):
-        problems.append("模型目录里没有 config.json，看着不像一份下全了的模型：%s" % model_dir)
     else:
-        weights = [f for f in os.listdir(model_dir) if f.endswith((".safetensors", ".bin"))]
-        if not weights:
-            problems.append("模型目录里没有权重文件（*.safetensors）：%s" % model_dir)
+        problems.extend(model_dir_problems(model_dir))
 
+    # 依赖最后查（import torch 要好几秒）：解释器本身就不在时没得查
+    if python_exe and os.path.isabs(python_exe) and os.path.isfile(python_exe):
+        why = import_problem(python_exe, cwd)
+        if why:
+            problems.append(why)
     return CheckResult(ok=not problems, problems=problems)
+
+
+def model_dir_problems(model_dir: str) -> list[str]:
+    """一份 Qwen3-ASR 模型目录下全了没有（download-model.ps1 的「下完了」判据也调它，同一口径）：
+    config.json 在；权重（*.safetensors / *.bin）至少一个、个个非零字节；目录里没有下载器没收尾的 *.incomplete；
+    有分片索引（*.index.json）就核对它列的分片个个都在、非零。回空列表＝下全了。"""
+    if not os.path.isdir(model_dir):
+        return ["模型目录不存在：%s" % model_dir]
+    problems: list[str] = []
+    names = sorted(os.listdir(model_dir))
+    if not os.path.isfile(os.path.join(model_dir, "config.json")):
+        problems.append("模型目录里没有 config.json，看着不像一份下全了的模型：%s" % model_dir)
+    partial = [n for n in names if n.endswith(".incomplete")]
+    if partial:
+        problems.append("模型目录里有没下完的文件 %s（下载中断？）：%s —— 重跑 scripts/download-model.ps1" % (partial[0], model_dir))
+    weights = [n for n in names if n.endswith((".safetensors", ".bin"))]
+    if not weights:
+        problems.append("模型目录里没有权重文件（*.safetensors）：%s" % model_dir)
+    empty = [n for n in weights if _size(os.path.join(model_dir, n)) <= 0]
+    if empty:
+        problems.append("权重文件 %s 是 0 字节（下载中断？）：%s —— 重跑 scripts/download-model.ps1" % ("、".join(empty), model_dir))
+    for idx in (n for n in names if n.endswith(".index.json")):
+        try:
+            with open(os.path.join(model_dir, idx), encoding="utf-8") as fh:
+                shards = sorted({str(v) for v in json.load(fh)["weight_map"].values()})
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            problems.append("分片索引 %s 读不了（下载中断？）：%s" % (idx, model_dir))
+            continue
+        missing = [n for n in shards if _size(os.path.join(model_dir, n)) <= 0]
+        if missing:
+            problems.append("分片索引 %s 列的 %d 个分片缺了 %d 个（%s）：%s —— 重跑 scripts/download-model.ps1"
+                            % (idx, len(shards), len(missing), "、".join(missing[:3]) + (" …" if len(missing) > 3 else ""), model_dir))
+    return problems
+
+
+def _size(path: str) -> int:
+    """文件字节数；不在／不是文件回 -1。"""
+    try:
+        return os.path.getsize(path) if os.path.isfile(path) else -1
+    except OSError:
+        return -1
+
+
+def import_problem(python_exe: str, cwd: str = "") -> str | None:
+    """用登记里的那个解释器（如意就用它起服务）在子进程里 import 一遍 IMPORT_CHECK。过了回 None，没过回一句人话。"""
+    mods = "、".join(IMPORT_CHECK)
+    try:
+        r = subprocess.run(
+            [python_exe, "-c", "import " + ", ".join(IMPORT_CHECK)],
+            cwd=cwd if cwd and os.path.isdir(cwd) else None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=IMPORT_CHECK_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return "解释器 %s 在 %d 秒内没 import 完依赖（%s）" % (python_exe, IMPORT_CHECK_TIMEOUT_SEC, mods)
+    except OSError as exc:
+        return "解释器 %s 跑不起来：%s" % (python_exe, exc)
+    if r.returncode != 0:
+        lines = [ln.strip() for ln in r.stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
+        why = lines[-1][:300] if lines else "退出码 %d" % r.returncode
+        return "解释器 %s 里 import 不了依赖（%s）：%s —— 先跑 scripts/install.ps1" % (python_exe, mods, why)
+    return None
 
 
 def build_record(
