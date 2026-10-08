@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import unittest
 
 from ruyi_asr_shim import COMPONENT_NAME_TAG, __version__
@@ -475,6 +476,30 @@ class TestModelCatalogAndUnload(unittest.TestCase):
             self.assertEqual(s.json_request("GET", "/v1/unload")[0], 405, "只收 POST")
             s.transcribe()
             self.assertEqual(self.rec.loads, 2, "卸了还能再载")
+
+    def test_unload_while_loading_answers_at_once(self):
+        """修前：/v1/unload 排队等模型加载完（首次在线下载可能好几分钟）；修后立刻回 loading，加载完、在途那一发转完就卸。"""
+        from .test_engine import SlowLoad
+
+        started, release = threading.Event(), threading.Event()
+        with ServerFixture(factory=lambda: SlowLoad(self.rec, started, release)) as s:
+            res = {}
+            th = threading.Thread(target=lambda: res.setdefault("r", s.transcribe()), daemon=True)
+            th.start()
+            try:
+                self.assertTrue(started.wait(5))
+                t0 = time.monotonic()
+                status, _h, body = s.json_request("POST", "/v1/unload")
+                self.assertLess(time.monotonic() - t0, 2.0)
+                self.assertEqual(status, 200)
+                self.assertEqual((body["ok"], body["unloaded"], body["loading"]), (True, False, True))
+            finally:
+                release.set()
+                th.join(10)
+            self.assertEqual(res["r"][0], 200)
+            self.assertEqual(self.rec.unloads, 1)
+            _st, _h, health = s.json_request("GET", "/health")
+            self.assertFalse(health["loaded"])
 
     def test_unload_gate_applies(self):
         with self.fixture() as s:

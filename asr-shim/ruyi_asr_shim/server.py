@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import COMPONENT_NAME_TAG, __version__
 from . import audio as audio_mod
 from .audio import UnsupportedAudioError
-from .engine import EngineError, EngineManager
+from .engine import LOADING, UNLOADED, EngineError, EngineManager
 from .watchdog import watchdog_from_env
 
 LOG = logging.getLogger("ruyi_asr_shim")
@@ -271,7 +271,8 @@ class ShimHandler(BaseHTTPRequestHandler):
         )
 
     def _unload(self) -> None:
-        """立刻卸载：在途的那一发转完才卸（引擎那把锁），所以可能等上一两秒。不读体、不要求体。"""
+        """立刻卸载：在途的那一发转完才卸（引擎那把锁），所以可能等上一两秒；正在加载（首次在线下载可能好几分钟）
+        就不等，立刻回 loading:true，加载完、在途那一发转完就卸。不读体、不要求体。"""
         # 体若有就吃掉（Content-Length 为 0 或没有都行），别让残余字节污染下一个请求。
         raw_len = self.headers.get("Content-Length")
         try:
@@ -284,9 +285,13 @@ class ShimHandler(BaseHTTPRequestHandler):
             self._fail(413, "payload_too_large", "/v1/unload 不收请求体。", close=True)
             return
         t0 = time.monotonic()
-        did = self.manager.unload_now()
-        LOG.info("unload requested did=%s ms=%d", did, int((time.monotonic() - t0) * 1000))
-        self._send(200, {"ok": True, "unloaded": bool(did), "loaded": False})
+        state = self.manager.request_unload()
+        LOG.info("unload requested state=%s ms=%d", state, int((time.monotonic() - t0) * 1000))
+        payload = {"ok": True, "unloaded": state == UNLOADED, "loaded": False}
+        if state == LOADING:
+            payload["loading"] = True
+            payload["message"] = "模型正在加载：不等它，加载完、在途那一发转完就卸载。"
+        self._send(200, payload)
 
     def _read_body(self) -> bytes | None:
         """读请求体，带 25 MB 双道闸（Content-Length 预检 + 累计），超了自己回 413。"""

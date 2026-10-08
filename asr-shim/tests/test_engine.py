@@ -309,5 +309,73 @@ class TestModelSwitch(unittest.TestCase):
         m.shutdown()
 
 
+class SlowLoad(FakeBackend):
+    """加载卡在 release 上（模拟首次在线下载／冷盘加载要好几分钟）；开始加载时 started 置位。"""
+
+    def __init__(self, rec, started, release):
+        super().__init__(rec)
+        self.started = started
+        self.release = release
+
+    def load(self):
+        self.started.set()
+        self.release.wait(10)
+        with self.rec.lock:
+            self.rec.loads += 1
+
+
+class TestLoadingDoesNotBlockUnloadOrShutdown(unittest.TestCase):
+    """修前：串行锁把模型加载（含首次在线下载）也包进去，unload_now 与 shutdown（看门狗退出走它）都要等加载完 ——
+    如意被杀后孤儿进程一直活到加载结束、占着端口。"""
+
+    def setUp(self):
+        self.rec = Recorder()
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.m = EngineManager(lambda: SlowLoad(self.rec, self.started, self.release), idle_unload_sec=0)
+        self.out = {}
+
+        def worker():
+            try:
+                self.out["r"] = self.m.transcribe(pcm())
+            except Exception as exc:  # noqa: BLE001
+                self.out["e"] = exc
+
+        self.th = threading.Thread(target=worker, daemon=True)
+        self.th.start()
+        self.assertTrue(self.started.wait(5), "后端没开始加载")
+
+    def tearDown(self):
+        self.release.set()
+        self.th.join(10)
+        self.m.shutdown()
+
+    def test_shutdown_does_not_wait_for_loading(self):
+        self.assertTrue(self.m.status()["loading"])
+        t0 = time.monotonic()
+        self.m.shutdown()
+        self.assertLess(time.monotonic() - t0, 1.0, "shutdown 不许排队等一次加载")
+        self.release.set()
+        self.th.join(5)
+        self.assertIsInstance(self.out.get("e"), EngineError, "已经在退出：加载完也不再推理")
+        self.assertEqual((self.rec.loads, self.rec.unloads), (1, 1), "加载完那一刻看到已关闭 → 立即卸载，不留显存")
+        self.assertFalse(self.m.loaded)
+        self.assertFalse(self.m.status()["loading"])
+        with self.assertRaises(EngineError):
+            self.m.transcribe(pcm())   # 关了就不再加载
+
+    def test_unload_during_loading_returns_loading_state(self):
+        t0 = time.monotonic()
+        self.assertEqual(self.m.request_unload(), "loading")
+        self.assertFalse(self.m.unload_now(), "正在加载：没卸成，回 False")
+        self.assertLess(time.monotonic() - t0, 1.0, "unload 不许排队等一次加载")
+        self.release.set()
+        self.th.join(5)
+        self.assertEqual(self.out.get("r", {}).get("text"), "你好世界", "在途那一发照常转完")
+        self.assertEqual((self.rec.loads, self.rec.unloads), (1, 1), "转完就兑现那次卸载")
+        self.assertFalse(self.m.loaded)
+        self.assertEqual(self.m.request_unload(), "not_loaded")
+
+
 if __name__ == "__main__":
     unittest.main()
