@@ -220,6 +220,17 @@ class TestWrite(RegistryCase):
         self.assertFalse(registration_path(self.env).exists(), "依赖 import 不了就不许登记")
         self.assertIn("torch", self.out.getvalue())
 
+    def test_register_rejects_port_outside_1024_65535(self):
+        """修前：--port 80 照登记，如意读登记时按 1024–65535 校验、把整份当成没装，静默跳过。"""
+        for bad in (80, 0, 1023, 65536, -1):
+            self.out = io.StringIO()
+            self.assertNotEqual(self.do_register(port=bad), 0, bad)
+            self.assertFalse(registration_path(self.env).exists(), bad)
+            self.assertIn("1024", self.out.getvalue())
+        for good in (1024, 65535):
+            self.assertEqual(self.do_register(port=good), 0, good)
+            self.assertEqual(json.loads(registration_path(self.env).read_text(encoding="utf-8"))["service"]["port"], good)
+
     def test_register_is_idempotent_and_overwrites(self):
         self.assertEqual(self.do_register(port=8790), 0)
         self.assertEqual(self.do_register(port=8999), 0)

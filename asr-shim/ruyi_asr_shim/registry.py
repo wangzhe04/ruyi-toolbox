@@ -30,6 +30,8 @@ DIR_ENV = "RUYI_TOOLBOX_COMPONENTS_DIR"
 # 加上 install.ps1 按显卡另装的 torch（不写在 pyproject 里）。soundfile 缺了只是少几种格式，不拦。
 IMPORT_CHECK = ("numpy", "transformers", "torch")
 IMPORT_CHECK_TIMEOUT_SEC = 180   # 冷盘上第一次 import torch 能要几十秒
+# 如意读登记时只认这个范围的 service.port（范围外的整份当作没装、静默跳过），所以写入前就拒
+PORT_MIN, PORT_MAX = 1024, 65535
 
 
 def components_dir(env=None) -> Path:
@@ -259,6 +261,9 @@ def register(
     models_root = os.path.abspath(models_root) if (models_root and is_auto(model_name)) else ""
     if is_auto(model_name) and not models_root:
         print("登记失败：--model auto 必须同时给 --models-root <models 目录>。", file=out)
+        return 3
+    if not (isinstance(port, int) and PORT_MIN <= port <= PORT_MAX):
+        print("登记失败：端口 %r 不在 %d–%d 内（如意只认这个范围，登记了也会被当成没装而跳过）。" % (port, PORT_MIN, PORT_MAX), file=out)
         return 3
 
     check = self_check(python_exe, cwd, model_dir, models_root)

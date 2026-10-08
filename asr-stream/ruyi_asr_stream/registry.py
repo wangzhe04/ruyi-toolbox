@@ -24,6 +24,8 @@ DEFAULT_PORT = 8791
 # 登记前用【登记里的那个解释器】真 import 一遍跑起来要的依赖（pyproject 的 dependencies）。
 IMPORT_CHECK = ("numpy", "sherpa_onnx")
 IMPORT_CHECK_TIMEOUT_SEC = 120
+# 如意读登记时只认这个范围的 service.port（范围外的整份当作没装、静默跳过），所以写入前就拒
+PORT_MIN, PORT_MAX = 1024, 65535
 
 
 def components_dir(env=None) -> Path:
@@ -194,6 +196,9 @@ def register(*, model_dir: str = "", model_name: str = DEFAULT_MODEL_NAME, port:
     cwd = os.path.abspath(cwd or _package_root())
     model_dir = os.path.abspath(model_dir) if model_dir else ""
     offline_model_dir = os.path.abspath(offline_model_dir) if offline_model_dir else ""
+    if not (isinstance(port, int) and PORT_MIN <= port <= PORT_MAX):
+        print("不登记：端口 %r 不在 %d–%d 内（如意只认这个范围，登记了也会被当成没装而跳过）。" % (port, PORT_MIN, PORT_MAX), file=out)
+        return 1
     check = self_check(python_exe, cwd, model_dir, offline_model_dir)
     if not check.ok:
         print("自检没过，不登记（登记文件存在 = 如意会去执行它）：", file=out)

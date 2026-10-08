@@ -157,6 +157,18 @@ class RegistryTest(unittest.TestCase):
         rec = json.loads(registration_path(self.env).read_text("utf-8"))
         self.assertEqual(rec["service"]["port"], 8791, "看不懂的端口环境变量回落缺省")
 
+    def test_register_rejects_port_outside_1024_65535(self):
+        """修前：--port 80 照登记，如意读登记时按 1024–65535 校验、把整份当成没装，静默跳过。"""
+        d = fake_model_dir(self.tmp)
+        for bad in (80, 0, 1023, 65536, -1):
+            out = io.StringIO()
+            self.assertEqual(register(model_dir=d, port=bad, python_exe=self.py, env=self.env, out=out), 1, bad)
+            self.assertFalse(registration_path(self.env).exists(), bad)
+            self.assertIn("1024", out.getvalue())
+        for good in (1024, 65535):
+            self.assertEqual(register(model_dir=d, port=good, python_exe=self.py, env=self.env, out=io.StringIO()), 0, good)
+            self.assertEqual(json.loads(registration_path(self.env).read_text("utf-8"))["service"]["port"], good)
+
     def test_unregister_idempotent(self):
         d = fake_model_dir(self.tmp)
         self.assertEqual(register(model_dir=d, python_exe=self.py, env=self.env, out=io.StringIO()), 0)
