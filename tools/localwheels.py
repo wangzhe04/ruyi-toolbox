@@ -12,12 +12,14 @@ torch），直接把它还原成轮子，就不用下、也不会错位。只有
 
 plan   ：列出本机 venv 里装了什么、能不能还原成轮子，以及每条 --spec 要求本机满不满足。
 export ：把能还原的包写成 DIR 下的 .whl，逐个包打一行结果（OK／SKIP／FAIL），另外每 ~0.4 秒打一行
-         "PROG 已写字节 总字节"（进度条用）；有 FAIL 就返回 1。
+         "PROG 已写字节 总字节"（进度条用）；有 FAIL 就返回 1。RECORD 里列了、磁盘上却没有的文件照旧不进轮子，
+         但先打一行 WARN 点名，OK 行带上缺失数（轮子是残缺的，装上可能跑不起来）。
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import hashlib
 import json
 import os
@@ -236,6 +238,35 @@ def gather_entries(rec):
     return entries, outside
 
 
+def missing_files(rec) -> list[str]:
+    """RECORD 里列了、磁盘上却没有的文件（相对 site-packages 的路径）。gather_entries 照旧跳过它们，这里只负责点名。
+
+    要直接读 RECORD：importlib.metadata 的 dist.files 会把不存在的文件悄悄滤掉，靠它永远看不见缺口。
+    只算本该进轮子的那些——site-packages 之外的（../../Scripts 下的入口脚本由安装器按 entry_points 重新生成）、
+    pyc、以及 RECORD／INSTALLER 这类重新生成或不带的 dist-info 文件都不算。"""
+    distinfo = rec["distinfo"]
+    site = distinfo.parent
+    try:
+        text = (distinfo / "RECORD").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out = []
+    for row in csv.reader(text.splitlines()):
+        if not row or not row[0]:
+            continue
+        rel = row[0].replace("\\", "/")
+        if rel.startswith("../") or os.path.isabs(rel):   # site-packages 之外（含 Scripts）本来就不进轮子
+            continue
+        base = rel.rsplit("/", 1)[-1]
+        if "__pycache__" in rel or rel.endswith(".pyc"):
+            continue
+        if rel.startswith(distinfo.name + "/") and base in _SKIP_IN_DISTINFO:
+            continue
+        if not (site / rel).is_file():
+            out.append(rel)
+    return out
+
+
 class Progress:
     """字节进度：每 ~0.4 秒打一行 "PROG 已写 总量"，给打包器的进度条用（大轮子 torch 要写好几分钟，不能一声不吭）。"""
 
@@ -314,10 +345,14 @@ def cmd_export(args) -> int:
             print(f"SKIP {label}  {rec['skip']}", flush=True)
         else:
             gathered = gather_entries(rec)
-            todo.append((rec, label, gathered))
-    progress = Progress(sum(src.stat().st_size for _, _, g in todo for _, src in g[0]))
+            todo.append((rec, label, gathered, missing_files(rec)))
+    progress = Progress(sum(src.stat().st_size for _, _, g, _ in todo for _, src in g[0]))
     progress.start()
-    for rec, label, gathered in todo:
+    for rec, label, gathered, missing in todo:
+        if missing:
+            # 照旧跳过（轮子里没有它们），但不能悄悄地——这个轮子是残缺的，装上可能跑不起来
+            more = f" 等 {len(missing)} 个" if len(missing) > 1 else ""
+            print(f"WARN {label}  RECORD 里列了、磁盘上没有的文件没带进轮子：{missing[0]}{more}", flush=True)
         try:
             filename, wheel_bytes, raw_bytes, nfiles, outside = build_wheel(
                 rec, args.out, args.level, gathered=gathered, progress=progress
@@ -332,6 +367,8 @@ def cmd_export(args) -> int:
         odd = [o for o in outside if "/scripts/" not in o.lower()]
         if odd:
             note = f"  （site-packages 之外的 {len(odd)} 个文件没带：{odd[0]} …）"
+        if missing:
+            note += f"  （缺 {len(missing)} 个文件，见上面 WARN）"
         print(f"OK   {label}  {filename}  {wheel_bytes / 1048576:.1f} MB{note}", flush=True)
     progress.finish()
     return 1 if failed else 0
