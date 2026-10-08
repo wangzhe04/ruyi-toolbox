@@ -145,6 +145,18 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(rec["run"]["env"]["RUYI_ASR_STREAM_MODEL"], "zh-only")
         self.assertEqual(rec["provides"][0]["model"], "zh-only")
 
+    def test_cli_register_survives_non_numeric_port_env(self):
+        """修前：RUYI_ASR_STREAM_PORT 不是数字时，register 子命令在算 --port 缺省值那一步直接抛 ValueError 栈。"""
+        from unittest import mock
+
+        from ruyi_asr_stream.__main__ import main
+
+        d = fake_model_dir(self.tmp)
+        with mock.patch.dict(os.environ, {"RUYI_ASR_STREAM_PORT": "abc", DIR_ENV: self.env[DIR_ENV]}):
+            self.assertEqual(main(["register", "--model-dir", d, "--python", self.py]), 0)
+        rec = json.loads(registration_path(self.env).read_text("utf-8"))
+        self.assertEqual(rec["service"]["port"], 8791, "看不懂的端口环境变量回落缺省")
+
     def test_unregister_idempotent(self):
         d = fake_model_dir(self.tmp)
         self.assertEqual(register(model_dir=d, python_exe=self.py, env=self.env, out=io.StringIO()), 0)

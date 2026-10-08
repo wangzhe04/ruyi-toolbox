@@ -29,11 +29,12 @@ def main(argv: list[str] | None = None) -> int:
         return unregister()
     from . import DEFAULT_MODEL_NAME, DEFAULT_OFFLINE_MODEL_NAME
     from .registry import DEFAULT_PORT, register
+    from .server import _env_int
 
     ap = argparse.ArgumentParser(prog="python -m ruyi_asr_stream register")
     ap.add_argument("--model-dir", default=os.environ.get("RUYI_ASR_STREAM_MODEL_DIR", "").strip())
     ap.add_argument("--model", default=os.environ.get("RUYI_ASR_STREAM_MODEL", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME)
-    ap.add_argument("--port", type=int, default=int(os.environ.get("RUYI_ASR_STREAM_PORT", "") or DEFAULT_PORT))
+    ap.add_argument("--port", type=int, default=_env_int(os.environ, "RUYI_ASR_STREAM_PORT", DEFAULT_PORT))
     ap.add_argument("--python", default="")
     ap.add_argument("--cwd", default="")
     # 131c：离线整句识别（SenseVoice）目录；给了就同时 provides asr
