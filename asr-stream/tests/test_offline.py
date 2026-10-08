@@ -21,7 +21,7 @@ from ruyi_asr_stream.registry import DIR_ENV, build_record, register, registrati
 from ruyi_asr_stream.server import Settings, pick_free_port
 
 from .helpers import Client, FakeBackend, speech, start_server
-from .helpers_offline import FakeOffline, multipart_body, start_server_with_offline, wav_bytes
+from .helpers_offline import FakeOffline, multipart_body, start_server_with_offline, wav_bytes, wav_with_rate
 
 
 class DecodingDefaultTest(unittest.TestCase):
@@ -116,6 +116,18 @@ class OfflineRouteTest(unittest.TestCase):
         self.assertEqual(st, 400)
         st, j, _ = self.c.request("POST", "/v1/audio/transcriptions", b"x", {"Content-Type": ctype, "Origin": "http://evil"})
         self.assertEqual(st, 403)
+
+    def test_broken_wav_is_4xx_json_not_dropped_connection(self):
+        """修前：截断的 WAV（np.frombuffer 抛 ValueError）、采样率为 0（ZeroDivisionError）都没接住，客户端只看到连接被断。"""
+        truncated = wav_bytes(speech(0.5))[:-1]           # 数据段少一个字节 → PCM16 字节数成了奇数
+        for data in (truncated, wav_with_rate(speech(0.5), 0)):
+            body, ctype = multipart_body(data)
+            st, j, _ = self.c.request("POST", "/v1/audio/transcriptions", body, {"Content-Type": ctype})
+            self.assertIn(st, (400, 415))
+            self.assertIn(j["error"]["type"], ("bad_request", "unsupported_media_type"))
+            self.assertTrue(j["error"]["message"])
+        st, _, _ = self.c.request("GET", "/health")
+        self.assertEqual(st, 200, "坏音频不该带垮服务")
 
     def test_stream_route_still_works_alongside(self):
         st, j, _ = self.c.open()

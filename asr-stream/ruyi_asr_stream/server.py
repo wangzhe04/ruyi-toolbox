@@ -294,6 +294,9 @@ class StreamHandler(BaseHTTPRequestHandler):
         except UnsupportedAudioError as exc:
             LOG.info("offline reject: unsupported audio bytes=%d", len(file_part.data))
             return self._fail(415, "unsupported_media_type", str(exc))
+        except Exception as exc:  # noqa: BLE001 - 格式对但坏了（截断的 WAV 等）：回 400，别让连接被断（与 asr-shim 同形）
+            LOG.info("offline reject: decode failed bytes=%d err=%s", len(file_part.data), type(exc).__name__)
+            return self._fail(400, "bad_request", "音频解码失败：" + _short(exc))
         try:
             out = self.offline.transcribe(pcm.samples)
         except Exception as exc:  # noqa: BLE001 - 解码异常不该带垮服务
@@ -329,7 +332,7 @@ class StreamHandler(BaseHTTPRequestHandler):
         if body.strip():
             try:
                 obj = json.loads(body.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError):   # 64 KB 内的深嵌套 [[[[… 抛的是 RecursionError
                 return self._fail(400, "bad_request", "请求体不是合法 JSON。")
             raw = obj.get("hotwords") if isinstance(obj, dict) else None
             if raw is not None and not isinstance(raw, list):

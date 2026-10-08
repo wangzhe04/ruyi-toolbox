@@ -103,6 +103,14 @@ class ServerTest(unittest.TestCase):
         st, j, _ = self.c.request("POST", "/v1/stream/sessions", b"{not json", {"Content-Type": "application/json"})
         self.assertEqual(st, 400)
 
+    def test_deeply_nested_json_is_400_not_dropped_connection(self):
+        """修前：64 KB 以内的深嵌套 JSON 让 json.loads 抛 RecursionError（不是 ValueError），没接住、连接被断。"""
+        for body in (b"[" * 50000, b'{"hotwords":' + b"[" * 30000 + b"]" * 30000 + b"}"):
+            st, j, _ = self.c.request("POST", "/v1/stream/sessions", body, {"Content-Type": "application/json"})
+            self.assertEqual((st, j["error"]["type"]), (400, "bad_request"))
+        st, _, _ = self.c.request("GET", "/health")
+        self.assertEqual(st, 200)
+
     def test_audio_validation(self):
         _, j, _ = self.c.open()
         sid = j["id"]
