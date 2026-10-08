@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from benchmark import digest, local_file, read_json, validate, write_json
+from benchmark import digest, local_file, validate, write_json
 from candidate_runtime import build_engine, convert, lock_models, verify_models
 
 
