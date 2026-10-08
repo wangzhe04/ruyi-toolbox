@@ -40,6 +40,8 @@ MAX_CHUNK_BYTES = 1024 * 1024          # 单块 ≤ 1 MB（32 s 音频；正常�
 MAX_JSON_BYTES = 64 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024     # 离线整句识别的 multipart 上限（与 asr-shim、如意的 25 MB 同口径）
 MAX_FIELD = 4096
+REQUEST_TIMEOUT_SEC = 30               # 连接上 30 秒没动静（声明了 Content-Length 却不发完的慢客户端）就断开，不让它永远占着一个线程
+MAX_INFLIGHT = 16                      # 同时在处理的请求数上限（会话最多 4 个、解码本来就串行）。超出回 503
 SESSION_RE = re.compile(r"^/v1/stream/sessions/([0-9a-f]{32})(?:/(audio|finish))?$")
 
 
@@ -108,6 +110,7 @@ class StreamHandler(BaseHTTPRequestHandler):
     server_version = "ruyi-asr-stream"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    timeout = REQUEST_TIMEOUT_SEC  # StreamRequestHandler 拿它给连接 settimeout；读写超时由基类断开连接
 
     settings: Settings
     manager: SessionManager
@@ -117,6 +120,25 @@ class StreamHandler(BaseHTTPRequestHandler):
         LOG.debug("http %s", fmt % args)
 
     # ── 基础设施 ───────────────────────────────────────────────────────────
+
+    def parse_request(self) -> bool:
+        """头读完、还没分派之前占一个名额；名额满了回 503（空闲的长连接不占名额）。"""
+        if not super().parse_request():
+            return False
+        if not self.server.inflight.acquire(blocking=False):
+            LOG.warning("busy reject: %d requests in flight", self.server.max_inflight)
+            self._fail(503, "server_busy", "同时在处理的请求太多了（上限 %d 个），稍后再试。" % self.server.max_inflight, close=True)
+            return False
+        self._holding_slot = True
+        return True
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        finally:
+            if getattr(self, "_holding_slot", False):
+                self._holding_slot = False
+                self.server.inflight.release()
 
     def _send(self, status: int, payload: dict | None, *, close: bool = False) -> None:
         body = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -129,7 +151,7 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.close_connection = True
         self.end_headers()
-        if body:
+        if body and self.command != "HEAD":   # HEAD 只回头部：写了体，同一连接上的下一个响应就错位了
             try:
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
@@ -384,7 +406,9 @@ class StreamServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, port: int, handler_cls):
+    def __init__(self, port: int, handler_cls, max_inflight: int = MAX_INFLIGHT):
+        self.max_inflight = max(1, int(max_inflight))
+        self.inflight = threading.BoundedSemaphore(self.max_inflight)
         super().__init__((BIND_HOST, port), handler_cls)
 
     def server_bind(self) -> None:
@@ -394,9 +418,10 @@ class StreamServer(ThreadingHTTPServer):
             raise RuntimeError("拒绝在非 127.0.0.1 的地址上监听：" + str(host))
 
 
-def build_server(settings: Settings, manager: SessionManager, offline: OfflineTranscriber | None = None) -> StreamServer:
+def build_server(settings: Settings, manager: SessionManager, offline: OfflineTranscriber | None = None,
+                 *, max_inflight: int = MAX_INFLIGHT) -> StreamServer:
     handler = type("BoundStreamHandler", (StreamHandler,), {"settings": settings, "manager": manager, "offline": offline})
-    return StreamServer(settings.port, handler)
+    return StreamServer(settings.port, handler, max_inflight)
 
 
 def make_manager(settings: Settings) -> SessionManager:

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import http.client
+import json
 import socket
+import threading
+import time
 import unittest
 
 from ruyi_asr_stream import COMPONENT_NAME_TAG, __version__
 from ruyi_asr_stream.engine import SessionManager
-from ruyi_asr_stream.server import BIND_HOST, MAX_CHUNK_BYTES, pick_free_port
+from ruyi_asr_stream.server import BIND_HOST, MAX_CHUNK_BYTES, Settings, StreamHandler, build_server, pick_free_port
 
 from .helpers import Client, FakeBackend, silence, speech, start_server
 
@@ -149,6 +153,74 @@ class ServerTest(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class SlowClientsAndLimitsTest(unittest.TestCase):
+    """修前：handler 没有 socket 超时（timeout=None），声明 Content-Length 却不发完的慢客户端一直挂着一个线程；
+    ThreadingHTTPServer 并发无上限；HEAD 经 _fail 写了 JSON 体，同一连接上下一个响应错位。"""
+
+    def start(self, **kw):
+        port = pick_free_port()
+        httpd = build_server(Settings(["--port", str(port), "--model-dir", "x"]), SessionManager(FakeBackend()), **kw)
+        threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return httpd, port
+
+    def slow_client(self, port):
+        sk = socket.create_connection(("127.0.0.1", port), timeout=10)
+        sk.sendall(("POST /v1/stream/sessions HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                    "Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n" % port).encode() + b'{"hotwords"')
+        return sk
+
+    def test_handler_has_socket_timeout(self):
+        self.assertEqual(StreamHandler.timeout, 30)
+
+    def test_slow_client_is_dropped_after_timeout(self):
+        httpd, port = self.start()
+        httpd.RequestHandlerClass.timeout = 0.5   # 30 秒太久，测试里调短（只影响这个服务的绑定子类）
+        sk = self.slow_client(port)
+        try:
+            t0 = time.monotonic()
+            while sk.recv(4096):
+                pass                                # 服务端超时后断开：recv 读到 b""
+            self.assertLess(time.monotonic() - t0, 5.0)
+        finally:
+            sk.close()
+        self.assertEqual(Client(port).request("GET", "/health")[0], 200)
+
+    def test_too_many_in_flight_is_503_json(self):
+        _httpd, port = self.start(max_inflight=1)
+        c = Client(port)
+        sk = self.slow_client(port)                 # 占住唯一的名额
+        try:
+            deadline = time.monotonic() + 5
+            st, j, _ = c.request("GET", "/health")
+            while st == 200 and time.monotonic() < deadline:   # 等慢客户端真的进了处理
+                time.sleep(0.05)
+                st, j, _ = c.request("GET", "/health")
+            self.assertEqual((st, j["error"]["type"]), (503, "server_busy"))
+        finally:
+            sk.close()
+        deadline = time.monotonic() + 5
+        while c.request("GET", "/health")[0] != 200 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(c.request("GET", "/health")[0], 200, "名额要还回来")
+
+    def test_head_sends_headers_only(self):
+        _httpd, port = self.start()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request("HEAD", "/health")
+            r = conn.getresponse()
+            self.assertEqual(r.status, 405)
+            r.read()
+            conn.request("GET", "/health")             # 同一条连接：HEAD 若带了体，这一发就错位
+            r = conn.getresponse()
+            self.assertEqual(r.status, 200)
+            self.assertTrue(json.loads(r.read().decode("utf-8"))["ok"])
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
