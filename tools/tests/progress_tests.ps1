@@ -165,7 +165,7 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $ex = Join-Path $tmp "ex"
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $ex)
-    Assert-Eq (Get-FileHash (Join-Path $ex "big.bin")).Hash (Get-FileHash (Join-Path $src "big.bin")).Hash "解出来的文件与原件逐字节相同"
+    Assert-Eq (Get-FileSha256 (Join-Path $ex "big.bin")) (Get-FileSha256 (Join-Path $src "big.bin")) "解出来的文件与原件逐字节相同"
     Assert-True (Test-Path (Join-Path $ex "sub\a.whl")) "子目录里的文件在（zip 内路径用 /）"
     Assert-True (Test-Path (Join-Path $ex "中文名.txt")) "中文文件名没坏"
 

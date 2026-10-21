@@ -48,6 +48,7 @@ param(
     [string]$OutputDir = "",
     [string]$ZipName = "",
     [switch]$IncludeTests,
+    [switch]$ModelUpdate,
     [switch]$KeepStagingDir,
     # 测试专用改道口子：指向一个假的 toolbox 根目录，不碰真仓库。正常使用不要给这个参数。
     [string]$Root = ""
@@ -1090,6 +1091,14 @@ function Test-PackagePreflight {
     }
 }
 
+function Get-FileSha256 {
+    param([string]$Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $sha.Dispose() }
+}
+
 function New-ToolboxBundle {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
@@ -1098,6 +1107,7 @@ function New-ToolboxBundle {
         [Parameter(Mandatory)][string]$OutputDir,
         [Parameter(Mandatory)][string]$ZipName,
         [switch]$IncludeTests,
+        [switch]$ModelUpdate,
         [switch]$KeepStagingDir,
         # 组件 id -> 是否顺带打包依赖库（离线安装用）。asr-shim 这类有 GpuTorch 表的组件，值是选中的
         # GPU 变体 key（"nvidia"／"amd"／"cpu"）；没有 GpuTorch 表的组件，任何非空真值就够（比如 "1"）。
@@ -1118,6 +1128,10 @@ function New-ToolboxBundle {
         throw ("不认识这些组件 id：" + ($unknown -join ", ") + "。能打包的有：" + (($all | ForEach-Object { $_.Id }) -join ", "))
     }
     if ($ComponentIds.Count -eq 0) { throw "一个组件都没选，没什么可打包的。" }
+    if ($ModelUpdate) {
+        if ($ComponentIds.Count -ne 1 -or $ComponentIds[0] -ne 'asr-shim') { throw '增量模型包目前只支持单独选择 Qwen3-ASR 组件。' }
+        if ($OfflineDeps.Count -gt 0 -or $IncludeTests) { throw '增量模型包不带依赖库或测试代码，请取消对应勾选。' }
+    }
     if ($ZipName -match '[\\/:*?"<>|]') { throw ("压缩包名里不能有这些字符：\ / : * ? "" < > |（收到：" + $ZipName + "）") }
 
     if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null }
@@ -1140,6 +1154,7 @@ function New-ToolboxBundle {
     # ── 先算清楚要干什么、各要多久，再预检，再开工 ──────────────────────────────────────────────
     & $Log "==> 分析要打包的内容……"
     $work = Get-BundleWorkPlan -AllComponents $all -ComponentIds $ComponentIds -ModelSelection $ModelSelection -OfflineDeps $OfflineDeps
+    if ($ModelUpdate -and @($work['asr-shim'].Models).Count -eq 0) { throw '增量模型包必须勾选至少一份已下载的 Qwen 模型。' }
     Test-PackagePreflight -Work $work -OutputDir $OutputDir -Log $Log
 
     $totalW = 5.0   # 写清单／README／setup.ps1、校验、收尾
@@ -1166,15 +1181,18 @@ function New-ToolboxBundle {
         New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 
         Enter-ProgressStage -Label ($id + "：复制源码") -Weight $wt.Source
-        $xd = @(".venv*", "__pycache__", "models", "samples", ".pytest_cache", ".mypy_cache", ".ruff_cache", "*.egg-info")
-        if (-not $IncludeTests) { $xd += "tests" }
-        $roboArgs = @($c.Dir, $destDir, "/E", "/XD") + $xd + @("/XF", "*.pyc", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS")
-        & robocopy.exe @roboArgs | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw ("复制 " + $id + " 的源码失败（robocopy 退出码 " + $LASTEXITCODE + "）") }
-        & $Log ("  源码已复制（不含 .venv/models/tests 等，见上面排除表）")
+        if (-not $ModelUpdate) {
+            $xd = @(".venv*", "__pycache__", "models", "samples", ".pytest_cache", ".mypy_cache", ".ruff_cache", "*.egg-info")
+            if (-not $IncludeTests) { $xd += "tests" }
+            $roboArgs = @($c.Dir, $destDir, "/E", "/XD") + $xd + @("/XF", "*.pyc", "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS")
+            & robocopy.exe @roboArgs | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw ("复制 " + $id + " 的源码失败（robocopy 退出码 " + $LASTEXITCODE + "）") }
+            & $Log ("  源码已复制（不含 .venv/models/tests 等，见上面排除表）")
+        }
         Exit-ProgressStage
 
         $bundledModelNames = @()
+        $modelFiles = @{}
         foreach ($m in $w.Models) {
             Test-CancelRequested
             $dstModel = Join-Path $destDir (Join-Path "models" $m.Name)
@@ -1184,6 +1202,16 @@ function New-ToolboxBundle {
             Copy-DirWithProgress -Source $m.Dir -Destination $dstModel -TotalBytes $m.Bytes -Detail "复制模型"
             Exit-ProgressStage
             $bundledModelNames += $m.Name
+            if ($ModelUpdate) {
+                & $Log ('  计算模型完整性校验：' + $m.Name)
+                $files = @{}
+                foreach ($file in (Get-ChildItem -LiteralPath $dstModel -Recurse -File)) {
+                    Test-CancelRequested
+                    $relative = $file.FullName.Substring($dstModel.Length + 1).Replace('\', '/')
+                    $files[$relative] = Get-FileSha256 -Path $file.FullName
+                }
+                $modelFiles[$m.Name] = $files
+            }
             $tag = if ($m.Slot) { "（" + $m.Slot + "）" } else { "" }
             & $Log ("  已带上模型" + $tag + "：" + $m.Label + "（" + (Format-Bytes $m.Bytes) + "）")
         }
@@ -1256,6 +1284,7 @@ function New-ToolboxBundle {
         $manifestComponents += [ordered]@{
             id = $id; name = $c.Name; module = $c.Module
             models = $bundledModelNames
+            modelFiles = $modelFiles
             offlineDeps = $hasOfflineDeps
             gpuVariant = $gpuVariant
             pythonVersion = $(if ($w.Offline) { $w.PyVer } else { "" })   # 带了离线依赖库才需要：目标机器要预先装好它
@@ -1268,6 +1297,7 @@ function New-ToolboxBundle {
     Enter-ProgressStage -Label "写入安装清单与脚本" -Weight 2.0
     $manifest = [ordered]@{
         schema = 1
+        mode = $(if ($ModelUpdate) { 'model-update' } else { 'full' })
         createdAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
         components = $manifestComponents
     }
@@ -1278,6 +1308,10 @@ function New-ToolboxBundle {
     Set-Content -LiteralPath (Join-Path $stageDir "README.txt") -Value $readme -Encoding UTF8
 
     $setupPs1 = Get-SetupScriptText
+    if ($ModelUpdate) {
+        $setupPs1 = Get-ModelUpdateSetupText
+        Copy-Item -LiteralPath (Join-Path $script:ToolsDir 'model_update.py') -Destination $stageDir
+    }
     Set-Utf8BomFile -Path (Join-Path $stageDir "setup.ps1") -Text $setupPs1
     $setupCmd = "@echo off`r`nchcp 65001 >nul`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0setup.ps1`" %*`r`necho.`r`npause`r`n"
     # .cmd 不能带 BOM：cmd.exe 不认 BOM，会把它当成第一行命令的一部分（报「'锘緻echo' 不是内部或外部命令」，
@@ -1340,6 +1374,9 @@ function Set-Utf8BomFile {
 
 function Get-BundleReadmeText {
     param($Manifest)
+    if ($Manifest.mode -eq 'model-update') {
+        return "如意 Qwen3-ASR 增量模型包`r`n`r`n解压到任意目录，双击「安装并接入如意.cmd」。`r`n自动读取当前用户的原安装登记，校验并补充模型、更新模型清单；无需联网或重装依赖。`r`n必须已安装并登记 Qwen3-ASR；找不到原安装时会停止并提示。`r`n原模型和端口等设置保留；已有同名模型内容不一致时停止，不覆盖。`r`n完成后重启如意工作台，在语音设置中选择所需模型。`r`n本包用完可删除。"
+    }
     $lines = @()
     $lines += "如意工作台 · 扩展组件安装包"
     $lines += "================================"
@@ -1374,6 +1411,27 @@ function Get-BundleReadmeText {
 }
 
 # ── 生成的 setup.ps1：在目标机器上跑，纯粹按 bundle-manifest.json 的记录重放，不认识别的逻辑 ──
+function Get-ModelUpdateSetupText {
+    return @'
+#Requires -Version 5.1
+$ErrorActionPreference = 'Stop'
+try {
+    $componentsDir = Join-Path $env:USERPROFILE '.ruyi-toolbox\components'
+    if ($env:RUYI_TOOLBOX_COMPONENTS_DIR) { $componentsDir = $env:RUYI_TOOLBOX_COMPONENTS_DIR }
+    $recordPath = Join-Path $componentsDir 'asr-shim.json'
+    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw '找不到旧安装登记，请先安装并登记 Qwen3-ASR。' }
+    $record = Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $python = $record.run.command
+    if (-not [System.IO.Path]::IsPathRooted($python) -or -not (Test-Path -LiteralPath $python -PathType Leaf)) { throw '旧安装的 Python 已失效，请先修复原安装。' }
+    & $python -I -X utf8 (Join-Path $PSScriptRoot 'model_update.py') $PSScriptRoot $recordPath
+    exit $LASTEXITCODE
+} catch {
+    Write-Host ('补充模型失败：' + $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+'@
+}
+
 function Get-SetupScriptText {
     return @'
 #Requires -Version 5.1
@@ -1569,7 +1627,7 @@ function Show-PackagerGui {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "如意扩展组件打包器 —— ruyi-toolbox"
-    $form.Size = New-Object System.Drawing.Size(780, 780)
+    $form.Size = New-Object System.Drawing.Size(780, 808)
     $form.MinimumSize = New-Object System.Drawing.Size(600, 500)
     $form.StartPosition = "CenterScreen"
 
@@ -1792,6 +1850,12 @@ function Show-PackagerGui {
     $form.Controls.Add($chkKeep)
 
     $y2 += 30
+    $chkModelUpdate = New-Object System.Windows.Forms.CheckBox
+    $chkModelUpdate.Text = '增量模型包（仅 Qwen；只带所选模型，自动补充到原安装，不勾依赖库）'
+    $chkModelUpdate.Location = New-Object System.Drawing.Point(12, $y2)
+    $chkModelUpdate.AutoSize = $true
+    $form.Controls.Add($chkModelUpdate)
+    $y2 += 28
     $btnPack = New-Object System.Windows.Forms.Button
     $btnPack.Text = "开始打包"
     $btnPack.Location = New-Object System.Drawing.Point(12, $y2)
@@ -1921,7 +1985,7 @@ function Show-PackagerGui {
             }
             $result = New-ToolboxBundle -RepoRoot $RepoRoot -ComponentIds $selectedIds -ModelSelection $modelSel -OfflineDeps $offlineDeps `
                 -OutputDir $outBox.Text.Trim() -ZipName $nameBox.Text.Trim() `
-                -IncludeTests:$chkTests.Checked -KeepStagingDir:$chkKeep.Checked -Log $logCb -Report $repCb
+                -IncludeTests:$chkTests.Checked -ModelUpdate:$chkModelUpdate.Checked -KeepStagingDir:$chkKeep.Checked -Log $logCb -Report $repCb
             $progressBar.Value = 1000
             $lblProg.Text = "100%   完成"
             & $logCb ("`n完成！" + (Format-Bytes $result.ZipBytes) + " —— " + $result.ZipPath)
@@ -1999,7 +2063,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $modelSel = ConvertFrom-ModelsSpec -Spec $Models
         $offlineDepsSel = ConvertFrom-OfflineDepsSpec -Spec $OfflineDeps
         $result = New-ToolboxBundle -RepoRoot $Root -ComponentIds $Components -ModelSelection $modelSel -OfflineDeps $offlineDepsSel `
-            -OutputDir $od -ZipName $zn -IncludeTests:$IncludeTests -KeepStagingDir:$KeepStagingDir
+            -OutputDir $od -ZipName $zn -IncludeTests:$IncludeTests -ModelUpdate:$ModelUpdate -KeepStagingDir:$KeepStagingDir
         Write-Host ("`n完成：" + $result.ZipPath)
         exit 0
     } else {

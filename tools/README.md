@@ -43,6 +43,27 @@ powershell -ExecutionPolicy Bypass -File .\tools\package-bundle.ps1 `
 
 打包这一步只在**这台**机器上跑；产物是自包含的一个 `.zip`，目标机器不需要装 ruyi-toolbox 仓库本身。
 
+## 补充模型：增量模型包
+
+目标电脑已经装好并登记 Qwen3-ASR 后，可以只补充 1.7B：打开打包器，只选 Qwen3-ASR 组件和
+1.7B 模型，勾选「增量模型包」，取消「打包依赖库」和「包含测试代码」。目前增量包仅支持 Qwen3-ASR。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\package-bundle.ps1 `
+    -Components asr-shim -Models "asr-shim=qwen3-asr-1.7b" `
+    -ModelUpdate -OutputDir dist -ZipName qwen-1.7b-update
+```
+
+在目标电脑上解压到任意目录，双击包里的「安装并接入如意.cmd」。脚本读取当前用户
+`~/.ruyi-toolbox/components/asr-shim.json`（支持 `RUYI_TOOLBOX_COMPONENTS_DIR`），自动找到原安装目录、
+模型目录和 Python，校验模型、复制到临时目录，完整复制后再放入原模型目录，最后原子更新登记中的模型清单。
+不安装依赖、不联网，不需要手动合并目录。保留已有模型、端口和其他登记设置；为支持多模型切换，
+组件切到 auto 模式，默认优先 0.6B。旧的单模型登记也支持，但模型文件夹必须使用标准模型目录名。
+
+缺少登记、原目录或解释器已失效时会停止；包内文件损坏或已有同名模型内容不同也会停止，避免覆盖旧模型。
+重复执行同一增量包会校验已有模型并更新登记；更新登记失败时撤回本次新增的模型。
+安装完成后重启如意工作台，在语音设置里选择 1.7B；解压的增量包可以删除。
+
 ## 在新机器上装
 
 1. 解压这个压缩包到任意目录（不要放进如意工作台自己的安装目录里；**也别放进嵌套很深的文件夹**——见下面

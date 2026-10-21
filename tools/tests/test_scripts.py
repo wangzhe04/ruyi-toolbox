@@ -60,7 +60,7 @@ class ScriptHygieneTest(unittest.TestCase):
         # 平时没人解析它——这里把它取出来单独解析一遍，免得改坏了要到目标机器上才发现。
         cmd = (
             f". '{ROOT / 'tools' / 'package-bundle.ps1'}';"
-            "$s = Get-SetupScriptText;$e=$null;$t=$null;"
+            "$s = (Get-SetupScriptText) + [Environment]::NewLine + (Get-ModelUpdateSetupText);$e=$null;$t=$null;"
             "[void][System.Management.Automation.Language.Parser]::ParseInput($s,[ref]$t,[ref]$e);"
             "if($e.Count){$e|ForEach-Object{'行 '+$_.Extent.StartLineNumber+': '+$_.Message};exit 1}"
         )
