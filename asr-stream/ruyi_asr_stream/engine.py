@@ -87,7 +87,7 @@ class SessionManager:
     # ── 生命周期 ────────────────────────────────────────────────────────────
 
     def open(self, hotwords: list[str] | None = None) -> Session:
-        words = _clean_hotwords(hotwords)
+        words = _clean_hotwords(hotwords, fold=getattr(self.backend, "fold_hotword", None))
         with self._table_lock:
             self.reap_idle()
             if len(self._sessions) >= self.max_sessions:
@@ -190,16 +190,27 @@ def _ms(samples: int) -> int:
     return int(round(samples * 1000 / SAMPLE_RATE))
 
 
-def _clean_hotwords(words) -> list[str]:
+MAX_HOTWORDS = 200
+
+
+def _clean_hotwords(words, fold=None) -> list[str]:
     """会话热词清洗：≤ 200 条、每条 ≤ 40 字、去不可打印字符、去重。
     词内的空白收成一个空格而不是删光 —— sherpa 按空格切词，「PULL REQUEST」删成「PULLREQUEST」
-    就成了另一串 BPE token，偏置的根本不是模型会出的那串。"""
+    就成了另一串 BPE token，偏置的根本不是模型会出的那串。去掉不可打印字符后空了的段（单独的零宽字符）不留，
+    否则 join 出双空格。先清洗、再数 200 条有效词（前面的空串不挤掉后面的词）。
+    fold：模型口味的整形（后端的 fold_hotword，如全大写词表把英文转大写），在去重【之前】做 —— 否则 Bug/BUG/bug
+    折叠后成了三行 BUG。"""
     out: list[str] = []
     seen: set[str] = set()
-    for w in (words or [])[:200]:
+    for w in (words or []):
+        if len(out) >= MAX_HOTWORDS:
+            break
         if not isinstance(w, str):
             continue
-        s = " ".join("".join(ch for ch in part if ch.isprintable()) for part in w.split())[:40].strip()
+        parts = ("".join(ch for ch in part if ch.isprintable()) for part in w.split())
+        s = " ".join(p for p in parts if p)[:40].strip()
+        if s and fold is not None:
+            s = fold(s)
         if s and s not in seen:
             seen.add(s)
             out.append(s)
@@ -218,7 +229,7 @@ def detect_modeling_unit(model_dir: str, tokens_path: str) -> tuple[str, str, bo
     has_upper = False
     has_lower = False
     try:
-        with open(tokens_path, encoding="utf-8") as fh:
+        with open(tokens_path, encoding="utf-8-sig") as fh:   # 带 BOM 的 tokens.txt：首行不吃掉 BOM 就认不出 <blk>
             for line in fh:
                 parts = line.split()   # 一行「符号 编号」；符号本身不含空白
                 sym = parts[0] if parts else ""
@@ -354,6 +365,10 @@ class SherpaBackend:
         if decoding == "modified_beam_search" and not self.bpe_vocab and unit == "cjkchar" and upper:
             LOG.warning("模型目录里没有 bpe.vocab：中文热词照常，英文热词切不出 token、不会生效（重跑 download-model.ps1 补上）")
         LOG.info("热词切词：modeling_unit=%s bpe_vocab=%s 英文转大写=%s", self.modeling_unit, "有" if self.bpe_vocab else "无", upper)
+
+    def fold_hotword(self, word: str) -> str:
+        """会话热词按模型口味整形（SessionManager 在去重之前调）：全大写词表下英文转大写。"""
+        return hotwords_for_model(word, self.upper_latin)
 
     def create_stream(self, hotwords: str):
         if hotwords and self.decoding == "modified_beam_search":

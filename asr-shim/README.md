@@ -137,7 +137,7 @@ AMD 卡的实测在下面「显卡加速 → AMD 卡」一节。
 | `RUYI_TOOLBOX_PARENT_PID` | 空 | 如意拉起时会给。给了就每 3 秒看一眼父进程还在不在，不在了自己干净退出。 |
 
 命令行也行：`python -m ruyi_asr_shim --port 8791 --idle-unload-sec 60`。
-另外三个子命令：`register` / `unregister` / `doctor`（`doctor` 打印环境自检，是**唯一**会主动 import torch 的入口）。
+另外三个子命令：`register` / `unregister` / `doctor`（`doctor` 打印环境自检，是服务进程里**唯一**会主动 import torch 的入口；`register` 登记前会用登记里的那个解释器另起一个子进程 import 一遍 numpy / transformers / torch，确认装好了才写登记文件）。
 
 ---
 
@@ -259,7 +259,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Gpu cpu
 | 症状 | 多半是 |
 | --- | --- |
 | 如意没发现它 | 登记文件在不在？`type %USERPROFILE%\.ruyi-toolbox\components\asr-shim.json`。不在就跑 `download-model.ps1`，或者手动 `python -m ruyi_asr_shim register --model-dir <模型目录>` |
-| `register` 说自检没过 | 它会逐条告诉你哪一条不过（模型目录不在／没权重／工作目录不对）。**自检不过就绝不写登记文件** —— 文件存在就等于让如意去执行它 |
+| `register` 说自检没过 | 它会逐条告诉你哪一条不过（模型目录不在／没权重或权重 0 字节、分片不全／工作目录不对／解释器里 import 不了依赖）。**自检不过就绝不写登记文件** —— 文件存在就等于让如意去执行它 |
 | 起不来，说端口用不了 | 端口被占。`RUYI_ASR_PORT=8791` 换一个。如意自己会挑空闲端口，这个问题只在手动起的时候有 |
 | 转写很慢（几十秒） | 在用 CPU。`python -m ruyi_asr_shim doctor` 看「会用的设备」是什么，以及为什么没用上显卡 |
 | 回 415 | 音频格式解不了（m4a/webm）。转成 wav |

@@ -57,6 +57,17 @@ Write-Host ""
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Dest) | Out-Null
 
+# 上次下载中断留下的 0 字节权重／配置删掉：不删的话下载器按「文件在」跳过，半截永远补不上。
+# 只动权重与 json（-Dest 可能指到别处，别的文件一概不碰）；下载器自己的断点续传文件也不碰。
+if (Test-Path -LiteralPath $Dest) {
+    Get-ChildItem -LiteralPath $Dest -File |
+        Where-Object { ($_.Length -eq 0) -and ($_.Extension -in @(".safetensors", ".bin", ".json")) } |
+        ForEach-Object {
+            Write-Host ("删掉上次没下完的 0 字节文件：" + $_.Name) -ForegroundColor Yellow
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+}
+
 if ($Source -eq "modelscope") {
     & $py -c "import modelscope" 2>$null
     if ($LASTEXITCODE -ne 0) {
@@ -92,9 +103,19 @@ print(p)
     }
 }
 
-$cfg = Join-Path $Dest "config.json"
-if (-not (Test-Path $cfg)) {
-    Write-Host ("下完了，但 " + $cfg + " 不在 —— 看着没下全。") -ForegroundColor Red
+# 「下全了没有」与 register 自检同一口径（ruyi_asr_shim.registry.model_dir_problems）：config.json 在、权重个个非零字节、
+# 没有下载器没收尾的 *.incomplete、分片索引（*.index.json）列的分片齐全。只查 config.json 会把下载中断的半截当成下好了。
+$checkCode = @'
+import sys
+from ruyi_asr_shim.registry import model_dir_problems
+problems = model_dir_problems(sys.argv[1])
+for p in problems:
+    print('  - ' + p)
+sys.exit(1 if problems else 0)
+'@
+& $py -c $checkCode $Dest
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ("下完了，但 " + $Dest + " 里的模型没下全（见上面）。再跑一次本脚本会续传、补齐。") -ForegroundColor Red
     exit 1
 }
 Write-Host ""

@@ -40,6 +40,14 @@ def wav_bytes(pcm16: bytes, sr: int = SR, channels: int = 1) -> bytes:
     return buf.getvalue()
 
 
+def wav_with_rate(pcm16: bytes, sr: int) -> bytes:
+    """头里写任意采样率（含 0 / 1 这种 wave 模块写不出来的非法值）的 16 bit 单声道 WAV：先按 16 kHz 写，再改头。"""
+    raw = bytearray(wav_bytes(pcm16))
+    raw[24:28] = int(sr).to_bytes(4, "little")
+    raw[28:32] = (int(sr) * 2).to_bytes(4, "little")
+    return bytes(raw)
+
+
 def multipart_body(file_data: bytes, fields: dict | None = None, boundary: str = "----ruyi-test") -> tuple[bytes, str]:
     crlf = b"\r\n"
     b = boundary.encode()

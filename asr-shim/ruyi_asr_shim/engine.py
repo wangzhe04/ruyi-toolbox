@@ -19,6 +19,11 @@ from .audio import TARGET_SR, AudioBuffer, UnsupportedAudioError  # noqa: F401 -
 
 LOG = logging.getLogger("ruyi_asr_shim.engine")
 
+# request_unload() 的三种回答
+UNLOADED = "unloaded"        # 卸了
+NOT_LOADED = "not_loaded"    # 本来就没加载
+LOADING = "loading"          # 正在加载：不等它，记一笔，加载完、在途那一发转完就卸
+
 
 class EngineError(Exception):
     """后端加载或推理失败（回 500）。"""
@@ -40,6 +45,10 @@ class EngineManager:
     第 133 波：一个进程管多份模型（0.6B／1.7B／auto）—— 同一时刻只加载【一份】。请求带 model 且与已加载的不是同一份
     → 先卸掉再加载要的那份（显存里永远最多一份）；`unload_now()` 给如意「用户切走了 → 立刻释放显存」用。
     工厂 `backend_factory(model_name)` 按名造后端；老式无参工厂照样收（测试与单模型模式）。
+
+    加载（含首次在线下载，可能好几分钟）虽然也在串行锁里，但有自己的状态位 `_loading`：unload 与 shutdown 看到正在加载
+    就不排队等那把锁 —— unload 记一笔、加载完在途那一发转完就卸；shutdown 立刻返回、加载完那一刻看到已关闭就地卸掉。
+    否则如意被杀后，看门狗要等加载结束才退得掉，孤儿进程一直占着端口。
     """
 
     def __init__(
@@ -65,6 +74,9 @@ class EngineManager:
         self._requested = ""                    # 这份后端是按哪个名字造的（"" / auto / qwen3-asr-0.6b …）
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
+        self._loading = False                   # 正在加载（_lock 由加载的那个请求拿着）
+        self._unload_pending = False            # 加载期间收到了 unload：在途那一发转完就卸
+        self._closed = False                    # shutdown 过了：不再加载；正在加载的那份加载完立即卸
 
     # ── 只读状态：绝不触发加载（/health 判据）────────────────────────────
 
@@ -72,6 +84,7 @@ class EngineManager:
         with self._state_lock:
             return {
                 "loaded": self._backend is not None,
+                "loading": self._loading,
                 "device": self._device,
                 "model": self._model,
                 "requested": self._requested,
@@ -119,18 +132,21 @@ class EngineManager:
                    model: str | None = None) -> dict:
         # 锁住整段：加载与推理都在里面。`with` 保证抛异常时锁一定被放开（判据之一）。
         with self._lock:
-            backend = self._ensure_loaded(str(model or ""))
             try:
-                result = backend.transcribe(pcm, language, prompt)
-            except UnsupportedAudioError:
-                raise
-            except EngineError:
-                raise
-            except Exception as exc:
-                raise EngineError(str(exc)[:400] or type(exc).__name__) from exc
+                backend = self._ensure_loaded(str(model or ""))
+                try:
+                    result = backend.transcribe(pcm, language, prompt)
+                except UnsupportedAudioError:
+                    raise
+                except EngineError:
+                    raise
+                except Exception as exc:
+                    raise EngineError(str(exc)[:400] or type(exc).__name__) from exc
+                finally:
+                    with self._state_lock:
+                        self._last_used = self._clock()
             finally:
-                with self._state_lock:
-                    self._last_used = self._clock()
+                self._apply_pending_unload()
         if not isinstance(result, dict) or not isinstance(result.get("text", ""), str):
             raise EngineError("后端回了一个形状不对的结果")
         return result
@@ -139,6 +155,8 @@ class EngineManager:
         """调用方已持有 self._lock。"""
         requested = requested or self._default_model
         with self._state_lock:
+            if self._closed:
+                raise EngineError("服务正在退出，不再加载模型")
             if self._backend is not None and self._same_model(requested):
                 return self._backend
             stale = self._backend
@@ -150,40 +168,98 @@ class EngineManager:
                 self._device = "unknown"
             self._do_unload(stale)
             LOG.info("换模型：已卸载 %s，改加载 %s", self._model or self._requested or "-", requested or "-")
+        with self._state_lock:
+            if self._closed:
+                raise EngineError("服务正在退出，不再加载模型")
+            self._loading = True
         t0 = self._clock()
+        ok = False
         try:
             backend = self._make(requested)
             backend.load()
+            ok = True
         except UnsupportedAudioError:
             raise
         except Exception as exc:
             LOG.error("模型加载失败：%s", str(exc)[:400])
             raise EngineError("模型加载失败：" + (str(exc)[:400] or type(exc).__name__)) from exc
+        finally:
+            if not ok:
+                with self._state_lock:
+                    self._loading = False
         with self._state_lock:
-            self._backend = backend
-            self._requested = requested
-            self._load_count += 1
-            self._device = getattr(backend, "device", "unknown")
-            self._model = str(getattr(backend, "resolved_model", "") or "")
-            self._last_used = self._clock()
+            self._loading = False
+            closed = self._closed
+            if not closed:
+                self._backend = backend
+                self._requested = requested
+                self._load_count += 1
+                self._device = getattr(backend, "device", "unknown")
+                self._model = str(getattr(backend, "resolved_model", "") or "")
+                self._last_used = self._clock()
+        if closed:
+            # 加载期间 shutdown 了（看门狗：如意没了）：刚加载的这份就地卸掉，别留占显存的孤儿
+            self._do_unload(backend)
+            LOG.info("加载完时服务已在退出：刚加载的模型已卸载")
+            raise EngineError("服务正在退出，刚加载完的模型已卸载")
         LOG.info("模型已加载 device=%s model=%s load_ms=%d", self._device, self._model or "-", int((self._clock() - t0) * 1000))
         self._start_reaper()
         return backend
 
     def unload_now(self) -> bool:
-        """立刻卸载（如意：用户把语音识别切走了）。等在途的那一发转完再卸；没加载回 False。"""
-        with self._lock:
+        """立刻卸载；卸了回 True，没加载／正在加载回 False（区别见 request_unload）。"""
+        return self.request_unload() == UNLOADED
+
+    def request_unload(self) -> str:
+        """立刻卸载（如意：用户把语音识别切走了）。回 UNLOADED / NOT_LOADED / LOADING。
+        在途推理等它转完再卸（几秒）；正在加载（首次在线下载可能好几分钟）就不等：记一笔、马上回 LOADING，
+        加载完、在途那一发转完就卸。"""
+        if not self._acquire_unless_loading(pending=True):
+            return LOADING
+        try:
             with self._state_lock:
                 backend = self._backend
                 if backend is None:
-                    return False
+                    return NOT_LOADED
                 self._backend = None
                 self._unload_count += 1
                 self._device = "unknown"
                 name = self._model or self._requested
             self._do_unload(backend)
             LOG.info("按请求卸载模型 %s，已释放显存", name or "-")
-            return True
+            return UNLOADED
+        finally:
+            self._lock.release()
+
+    def _acquire_unless_loading(self, *, pending: bool = False, close: bool = False) -> bool:
+        """拿串行锁，但绝不排队等一次加载：每 50 ms 看一眼，正在加载就回 False（锁没拿到）。
+        pending=True：顺手记下「加载完就卸」；close=True：先置关闭标记（之后不再开新的加载）。"""
+        while True:
+            with self._state_lock:
+                if close:
+                    self._closed = True
+                if self._loading:
+                    if pending:
+                        self._unload_pending = True
+                    return False
+            if self._lock.acquire(timeout=0.05):
+                return True
+
+    def _apply_pending_unload(self) -> None:
+        """调用方已持有 self._lock。加载期间收到过 unload：在途这一发转完（或失败）就兑现。"""
+        with self._state_lock:
+            if not self._unload_pending:
+                return
+            self._unload_pending = False
+            backend = self._backend
+            if backend is None:
+                return
+            self._backend = None
+            self._unload_count += 1
+            self._device = "unknown"
+            name = self._model or self._requested
+        self._do_unload(backend)
+        LOG.info("加载期间收到的卸载请求：在途那一发转完，已卸载模型 %s", name or "-")
 
     # ── 空闲卸载 ──────────────────────────────────────────────────────────
 
@@ -244,14 +320,21 @@ class EngineManager:
             LOG.exception("卸载后端时出错（忽略）")
 
     def shutdown(self) -> None:
+        """退出时调（看门狗也走这里）。正在加载就不等：立刻返回，加载完那一刻看到已关闭会就地卸掉；
+        在途推理照旧等它转完再卸。"""
         self._stop.set()
-        with self._lock:
+        if not self._acquire_unless_loading(close=True):
+            LOG.info("退出时模型还在加载：不等它，加载完立即卸载")
+            return
+        try:
             with self._state_lock:
                 backend = self._backend
                 self._backend = None
                 self._device = "unknown"
             if backend is not None:
                 self._do_unload(backend)
+        finally:
+            self._lock.release()
 
 
 # ── Qwen3-ASR 后端（真正碰 torch/transformers 的那一层）────────────────────

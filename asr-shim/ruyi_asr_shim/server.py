@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import COMPONENT_NAME_TAG, __version__
 from . import audio as audio_mod
 from .audio import UnsupportedAudioError
-from .engine import EngineError, EngineManager
+from .engine import LOADING, UNLOADED, EngineError, EngineManager
 from .watchdog import watchdog_from_env
 
 LOG = logging.getLogger("ruyi_asr_shim")
@@ -38,6 +38,8 @@ BIND_HOST = "127.0.0.1"  # 硬编码，不提供改绑开关（方案 §2.2 第 
 DEFAULT_PORT = 8790
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 与主仓 ASR_MAX_BODY_BYTES 同值
 MAX_HEADER_FIELD = 4096
+REQUEST_TIMEOUT_SEC = 30  # 连接上 30 秒没动静（声明了 Content-Length 却不发完的慢客户端）就断开，不让它永远占着一个线程
+MAX_INFLIGHT = 16         # 同时在处理的请求数上限（推理本来就串行；排队的每个都可能攥着 25 MB 的体）。超出回 503
 
 # 如意侧要填的模型名 ←→ 实际的 HuggingFace/ModelScope 仓库名。
 # 注意是 `-hf` 那份：原生 transformers 只认它（依据见 docs/backend-notes.md §1）。
@@ -126,6 +128,7 @@ class ShimHandler(BaseHTTPRequestHandler):
     server_version = "ruyi-asr-shim"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    timeout = REQUEST_TIMEOUT_SEC  # StreamRequestHandler 拿它给连接 settimeout；读写超时由基类断开连接
 
     # 由 serve() 注入
     settings: Settings
@@ -136,6 +139,25 @@ class ShimHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - 覆写基类
         # 基类默认往 stderr 打「请求行」，里面含 query string。我们自己记元数据，这里闭嘴。
         LOG.debug("http %s", fmt % args)
+
+    def parse_request(self) -> bool:
+        """头读完、还没分派之前占一个名额；名额满了回 503（空闲的长连接不占名额）。"""
+        if not super().parse_request():
+            return False
+        if not self.server.inflight.acquire(blocking=False):
+            LOG.warning("busy reject: %d requests in flight", self.server.max_inflight)
+            self._fail(503, "server_busy", "同时在处理的请求太多了（上限 %d 个），稍后再试。" % self.server.max_inflight, close=True)
+            return False
+        self._holding_slot = True
+        return True
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        finally:
+            if getattr(self, "_holding_slot", False):
+                self._holding_slot = False
+                self.server.inflight.release()
 
     def _send(self, status: int, payload: dict, *, close: bool = False) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -148,6 +170,8 @@ class ShimHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.close_connection = True
         self.end_headers()
+        if self.command == "HEAD":
+            return  # HEAD 只回头部：写了体，同一连接上的下一个响应就错位了
         try:
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -271,7 +295,8 @@ class ShimHandler(BaseHTTPRequestHandler):
         )
 
     def _unload(self) -> None:
-        """立刻卸载：在途的那一发转完才卸（引擎那把锁），所以可能等上一两秒。不读体、不要求体。"""
+        """立刻卸载：在途的那一发转完才卸（引擎那把锁），所以可能等上一两秒；正在加载（首次在线下载可能好几分钟）
+        就不等，立刻回 loading:true，加载完、在途那一发转完就卸。不读体、不要求体。"""
         # 体若有就吃掉（Content-Length 为 0 或没有都行），别让残余字节污染下一个请求。
         raw_len = self.headers.get("Content-Length")
         try:
@@ -284,9 +309,13 @@ class ShimHandler(BaseHTTPRequestHandler):
             self._fail(413, "payload_too_large", "/v1/unload 不收请求体。", close=True)
             return
         t0 = time.monotonic()
-        did = self.manager.unload_now()
-        LOG.info("unload requested did=%s ms=%d", did, int((time.monotonic() - t0) * 1000))
-        self._send(200, {"ok": True, "unloaded": bool(did), "loaded": False})
+        state = self.manager.request_unload()
+        LOG.info("unload requested state=%s ms=%d", state, int((time.monotonic() - t0) * 1000))
+        payload = {"ok": True, "unloaded": state == UNLOADED, "loaded": False}
+        if state == LOADING:
+            payload["loading"] = True
+            payload["message"] = "模型正在加载：不等它，加载完、在途那一发转完就卸载。"
+        self._send(200, payload)
 
     def _read_body(self) -> bytes | None:
         """读请求体，带 25 MB 双道闸（Content-Length 预检 + 累计），超了自己回 413。"""
@@ -495,7 +524,9 @@ class ShimServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False  # 端口被占就直接失败，不要悄悄抢别人的监听
 
-    def __init__(self, port: int, handler_cls):
+    def __init__(self, port: int, handler_cls, max_inflight: int = MAX_INFLIGHT):
+        self.max_inflight = max(1, int(max_inflight))
+        self.inflight = threading.BoundedSemaphore(self.max_inflight)
         super().__init__((BIND_HOST, port), handler_cls)
 
     def server_bind(self) -> None:
@@ -507,9 +538,9 @@ class ShimServer(ThreadingHTTPServer):
             raise RuntimeError("拒绝在非 127.0.0.1 的地址上监听：" + str(host))
 
 
-def build_server(settings: Settings, manager: EngineManager) -> ShimServer:
+def build_server(settings: Settings, manager: EngineManager, *, max_inflight: int = MAX_INFLIGHT) -> ShimServer:
     handler = type("BoundShimHandler", (ShimHandler,), {"settings": settings, "manager": manager})
-    return ShimServer(settings.port, handler)
+    return ShimServer(settings.port, handler, max_inflight)
 
 
 def serve(settings: Settings | None = None) -> int:

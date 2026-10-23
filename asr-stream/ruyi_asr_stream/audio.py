@@ -13,6 +13,13 @@ from dataclasses import dataclass
 import numpy as np
 
 TARGET_SR = 16000
+# 采样率白名单：电话音的 8 kHz 到录音棚的 192 kHz。头里写 0（除零）、1（重采样放大 16000 倍，2 万字节吃掉 3 GB 内存）
+# 这类值只可能是坏文件或被改过的头，一律 415。
+MIN_SAMPLE_RATE = 8000
+MAX_SAMPLE_RATE = 192000
+# 重采样输出的上限（秒）。本服务收的体上限是 25 MB：白名单最低的 8 kHz、8 bit 单声道 WAV 也就 55 分钟，
+# 一小时封顶不会误拒正常文件，只挡「头部谎报」把输出撑爆内存。
+MAX_AUDIO_SEC = 3600
 
 
 class UnsupportedAudioError(ValueError):
@@ -40,6 +47,9 @@ def decode_wav_to_mono16k(data: bytes) -> AudioBuffer:
             raw = w.readframes(w.getnframes())
     except wave.Error as exc:
         raise UnsupportedAudioError("WAV 头解析失败：%s" % (str(exc)[:120])) from exc
+    if not MIN_SAMPLE_RATE <= sr <= MAX_SAMPLE_RATE:
+        raise UnsupportedAudioError("WAV 头里的采样率 %d Hz 不在支持范围（%d–%d Hz）内，看着像坏文件。"
+                                    % (sr, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE))
     if width == 1:
         arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
     elif width == 2:
@@ -69,6 +79,8 @@ def resample_linear(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     if src_sr == dst_sr or x.size == 0:
         return x
     n_out = int(round(len(x) * dst_sr / float(src_sr)))
+    if n_out > MAX_AUDIO_SEC * dst_sr:
+        raise UnsupportedAudioError("音频太长：超过 %d 分钟上限。" % (MAX_AUDIO_SEC // 60))
     if n_out <= 0:
         return np.zeros(0, dtype=np.float32)
     idx = np.linspace(0.0, len(x) - 1.0, n_out, dtype=np.float64)

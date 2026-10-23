@@ -11,16 +11,18 @@ import io
 import json
 import logging
 import os
+import socket
 import tempfile
 import threading
+import time
 import unittest
 
 from ruyi_asr_shim import COMPONENT_NAME_TAG, __version__
 from ruyi_asr_shim.audio import TEMP_PREFIX
 from ruyi_asr_shim.engine import EngineManager
-from ruyi_asr_shim.server import BIND_HOST, MAX_UPLOAD_BYTES, Settings, build_server, pick_free_port
+from ruyi_asr_shim.server import BIND_HOST, MAX_UPLOAD_BYTES, Settings, ShimHandler, build_server, pick_free_port
 
-from .helpers import FakeBackend, Recorder, build_multipart, make_wav
+from .helpers import FakeBackend, Recorder, build_multipart, make_wav, wav_with_rate
 
 
 class ServerFixture:
@@ -312,6 +314,14 @@ class TestTranscribe(unittest.TestCase):
             status, _h, body = s.transcribe(audio=broken)
             self.assertIn(status, (400, 415))
 
+    def test_bad_sample_rate_415(self):
+        """采样率头为 0 / 1：修前一个除零回 400、一个按 16000 倍放大重采样（大文件就是吃光内存）。"""
+        with ServerFixture() as s:
+            for sr in (0, 1):
+                status, _h, body = s.transcribe(audio=wav_with_rate(sr))
+                self.assertEqual((status, body["error"]["type"]), (415, "unsupported_media_type"), "sr=%d" % sr)
+            self.assertEqual(s.rec.loads, 0)
+
     def test_engine_error_is_human_envelope_500(self):
         with ServerFixture(raise_on_call=RuntimeError("CUDA out of memory")) as s:
             status, _h, body = s.transcribe()
@@ -468,12 +478,102 @@ class TestModelCatalogAndUnload(unittest.TestCase):
             s.transcribe()
             self.assertEqual(self.rec.loads, 2, "卸了还能再载")
 
+    def test_unload_while_loading_answers_at_once(self):
+        """修前：/v1/unload 排队等模型加载完（首次在线下载可能好几分钟）；修后立刻回 loading，加载完、在途那一发转完就卸。"""
+        from .test_engine import SlowLoad
+
+        started, release = threading.Event(), threading.Event()
+        with ServerFixture(factory=lambda: SlowLoad(self.rec, started, release)) as s:
+            res = {}
+            th = threading.Thread(target=lambda: res.setdefault("r", s.transcribe()), daemon=True)
+            th.start()
+            try:
+                self.assertTrue(started.wait(5))
+                t0 = time.monotonic()
+                status, _h, body = s.json_request("POST", "/v1/unload")
+                self.assertLess(time.monotonic() - t0, 2.0)
+                self.assertEqual(status, 200)
+                self.assertEqual((body["ok"], body["unloaded"], body["loading"]), (True, False, True))
+            finally:
+                release.set()
+                th.join(10)
+            self.assertEqual(res["r"][0], 200)
+            self.assertEqual(self.rec.unloads, 1)
+            _st, _h, health = s.json_request("GET", "/health")
+            self.assertFalse(health["loaded"])
+
     def test_unload_gate_applies(self):
         with self.fixture() as s:
             status, _h, _b = s.json_request("POST", "/v1/unload", headers={"Origin": "http://evil.example"})
             self.assertEqual(status, 403)
             status, _h, _b = s.json_request("POST", "/v1/unload", host="evil.example:80")
             self.assertEqual(status, 403)
+
+
+class TestSlowClientsAndLimits(unittest.TestCase):
+    """修前：handler 没有 socket 超时（timeout=None），声明 Content-Length 1000 只发 10 字节的慢客户端一直挂着一个线程；
+    ThreadingHTTPServer 并发无上限；HEAD 经 _fail 写了 JSON 体，同一连接上下一个响应错位。"""
+
+    def slow_client(self, port):
+        sk = socket.create_connection(("127.0.0.1", port), timeout=10)
+        sk.sendall(("POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                    "Content-Type: multipart/form-data; boundary=x\r\nContent-Length: 1000\r\n\r\n" % port).encode()
+                   + b"0123456789")
+        return sk
+
+    def test_handler_has_socket_timeout(self):
+        self.assertEqual(ShimHandler.timeout, 30)
+
+    def test_slow_client_is_dropped_after_timeout(self):
+        with ServerFixture() as s:
+            s.httpd.RequestHandlerClass.timeout = 0.5   # 30 秒太久，测试里调短（只影响这个 fixture 的绑定子类）
+            sk = self.slow_client(s.port)
+            try:
+                t0 = time.monotonic()
+                while sk.recv(4096):
+                    pass                                 # 服务端超时后断开：recv 读到 b""
+                self.assertLess(time.monotonic() - t0, 5.0)
+            finally:
+                sk.close()
+            self.assertEqual(s.json_request("GET", "/health")[0], 200)
+
+    def test_too_many_in_flight_is_503_json(self):
+        with ServerFixture() as s:
+            s.httpd.shutdown()
+            s.httpd.server_close()
+            s.httpd = build_server(s.settings, s.manager, max_inflight=1)
+            s.thread = threading.Thread(target=s.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            s.thread.start()
+            sk = self.slow_client(s.port)               # 占住唯一的名额
+            try:
+                deadline = time.monotonic() + 5
+                status, _h, body = s.json_request("GET", "/health")
+                while status == 200 and time.monotonic() < deadline:   # 等慢客户端真的进了处理
+                    time.sleep(0.05)
+                    status, _h, body = s.json_request("GET", "/health")
+                self.assertEqual(status, 503)
+                self.assertEqual(body["error"]["type"], "server_busy")
+            finally:
+                sk.close()
+            deadline = time.monotonic() + 5
+            while s.json_request("GET", "/health")[0] != 200 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(s.json_request("GET", "/health")[0], 200, "名额要还回来")
+
+    def test_head_sends_headers_only(self):
+        with ServerFixture() as s:
+            conn = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
+            try:
+                conn.request("HEAD", "/health")
+                r = conn.getresponse()
+                self.assertEqual(r.status, 405)
+                r.read()
+                conn.request("GET", "/health")             # 同一条连接：HEAD 若带了体，这一发就错位
+                r = conn.getresponse()
+                self.assertEqual(r.status, 200)
+                self.assertTrue(json.loads(r.read().decode("utf-8"))["ok"])
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import os
 import threading
 import time
 import wave
@@ -82,6 +83,14 @@ def make_wav(seconds: float = 0.5, sr: int = 16000, channels: int = 1, width: in
     return buf.getvalue()
 
 
+def wav_with_rate(sr: int, n: int = 100) -> bytes:
+    """头里写任意采样率（含 0 这种 wave 模块写不出来的非法值）的 16 bit 单声道 WAV：先按 16 kHz 写，再改头。"""
+    raw = bytearray(make_wav(n / 16000.0))
+    raw[24:28] = int(sr).to_bytes(4, "little")
+    raw[28:32] = (int(sr) * 2).to_bytes(4, "little")
+    return bytes(raw)
+
+
 def build_multipart(fields: dict, files: list[tuple], boundary: str = "----ruyiTestBoundary1234"):
     """按如意（Node undici FormData）那边的形状拼：先若干文本字段，最后 file 段带 filename 与 content-type。
 
@@ -103,3 +112,33 @@ def build_multipart(fields: dict, files: list[tuple], boundary: str = "----ruyiT
         out += data + b"\r\n"
     out += b"--" + b + b"--\r\n"
     return "multipart/form-data; boundary=" + boundary, bytes(out)
+
+
+def fake_python(directory, *, exit_code: int = 0, stderr: str = "") -> str:
+    """假解释器：登记自检拿它跑 `-c "import …"`，退出码与 stderr 由测试定；收到的参数记在同目录的 args.txt。
+    POSIX 上是带 shebang 的 sh 脚本，Windows 上是 .cmd（CreateProcess 认得）。不碰真 venv、不需要 torch／sherpa-onnx。"""
+    os.makedirs(str(directory), exist_ok=True)
+    if os.name == "nt":
+        path = os.path.join(str(directory), "python.cmd")
+        lines = ["@echo off", 'echo %* > "%~dp0args.txt"']
+        if stderr:
+            lines.append("echo %s 1>&2" % stderr)
+        lines.append("exit /b %d" % exit_code)
+        content = "\r\n".join(lines) + "\r\n"
+    else:
+        path = os.path.join(str(directory), "python")
+        lines = ["#!/bin/sh", 'printf "%s\\n" "$*" > "$(dirname "$0")/args.txt"']
+        if stderr:
+            lines.append("echo '%s' 1>&2" % stderr)
+        lines.append("exit %d" % exit_code)
+        content = "\n".join(lines) + "\n"
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(content)
+    os.chmod(path, 0o755)
+    return path
+
+
+def fake_python_args(path: str) -> str:
+    """假解释器上一次收到的参数（一行）。"""
+    with open(os.path.join(os.path.dirname(path), "args.txt"), encoding="utf-8", errors="replace") as fh:
+        return fh.read()

@@ -16,7 +16,7 @@ from ruyi_asr_shim.audio import (
     sniff_format,
 )
 
-from .helpers import make_wav
+from .helpers import make_wav, wav_with_rate
 
 
 class TestSniff(unittest.TestCase):
@@ -88,6 +88,28 @@ class TestDecode(unittest.TestCase):
     def test_garbage_is_rejected(self):
         with self.assertRaises(Exception):
             decode_to_mono16k(b"hello, this is not audio at all" * 4)
+
+    def test_sample_rate_whitelist(self):
+        """修前：头里采样率 = 1 Hz 时线性重采样放大 16000 倍（2 万字节吃掉 3 GB 内存）；= 0 时除零。"""
+        for sr in (0, 1, 7999, 192001):
+            with self.assertRaises(UnsupportedAudioError, msg="sr=%d" % sr):
+                decode_to_mono16k(wav_with_rate(sr))
+        self.assertEqual(decode_to_mono16k(wav_with_rate(8000)).sample_rate, TARGET_SR)
+        self.assertEqual(decode_to_mono16k(wav_with_rate(192000)).sample_rate, TARGET_SR)
+
+    def test_resample_output_is_capped(self):
+        from ruyi_asr_shim import audio
+
+        saved = audio.MAX_AUDIO_SEC
+        audio.MAX_AUDIO_SEC = 2
+        try:
+            with self.assertRaises(UnsupportedAudioError):
+                audio._resample(np.zeros(8000 * 3, dtype=np.float32), 8000, TARGET_SR)
+            with self.assertRaises(UnsupportedAudioError):
+                decode_to_mono16k(make_wav(3.0, sr=8000))
+            self.assertEqual(len(audio._resample(np.zeros(8000, dtype=np.float32), 8000, TARGET_SR)), TARGET_SR)
+        finally:
+            audio.MAX_AUDIO_SEC = saved
 
     def test_cleanup_is_safe_to_call(self):
         self.assertIsInstance(cleanup_stale_temp(), int)

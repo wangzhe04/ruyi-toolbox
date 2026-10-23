@@ -13,12 +13,12 @@ import tempfile
 import types
 import unittest
 
-from ruyi_asr_stream.engine import SherpaBackend, _clean_hotwords, detect_modeling_unit, hotwords_for_model
+from ruyi_asr_stream.engine import SessionManager, SherpaBackend, _clean_hotwords, detect_modeling_unit, hotwords_for_model
 
 
-def _model_dir(tokens: list[str], *, vocab: bool) -> str:
+def _model_dir(tokens: list[str], *, vocab: bool, bom: bool = False) -> str:
     d = tempfile.mkdtemp(prefix="ruyi-asr-stream-hot-")
-    with open(os.path.join(d, "tokens.txt"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(d, "tokens.txt"), "w", encoding="utf-8-sig" if bom else "utf-8") as fh:
         for i, sym in enumerate(tokens):
             fh.write("%s %d\n" % (sym, i))
     for name in ("encoder-epoch-99-avg-1.int8.onnx", "decoder-epoch-99-avg-1.onnx", "joiner-epoch-99-avg-1.int8.onnx"):
@@ -77,6 +77,11 @@ class DetectTest(unittest.TestCase):
         unit, _, upper = detect_modeling_unit(d, os.path.join(d, "tokens.txt"))
         self.assertEqual((unit, upper), ("bpe", False))
 
+    def test_tokens_with_bom(self):
+        """修前：tokens.txt 带 BOM 时首行「\ufeff<blk>」不被认成特殊符号，blk 的小写字母让全大写词表判成了有小写。"""
+        d = _model_dir(BILINGUAL, vocab=True, bom=True)
+        self.assertEqual(detect_modeling_unit(d, os.path.join(d, "tokens.txt")), ("cjkchar+bpe", os.path.join(d, "bpe.vocab"), True))
+
     def test_missing_tokens_file_is_cjkchar(self):
         self.assertEqual(detect_modeling_unit("", "/nonexistent/tokens.txt"), ("cjkchar", "", False))
 
@@ -88,6 +93,21 @@ class ShapeTest(unittest.TestCase):
 
     def test_clean_keeps_single_inner_space(self):
         self.assertEqual(_clean_hotwords(["pull   request", "\tgit  ", "如 意", "a\u0000b"]), ["pull request", "git", "如 意", "ab"])
+
+
+    def test_clean_drops_empty_segments(self):
+        """修前：单独成段的零宽字符被删光后留下空段，join 出双空格 —— 切出来的 token 对不上。"""
+        self.assertEqual(_clean_hotwords(["PULL \u200b REQUEST", "\u200b 如意"]), ["PULL REQUEST", "如意"])
+
+    def test_clean_filters_before_truncating(self):
+        """修前：先截前 200 项再过滤，前面的空串／空白把后面的有效词挤掉了。"""
+        self.assertEqual(_clean_hotwords([""] * 150 + ["  "] * 100 + ["如意"]), ["如意"])
+        many = ["词%d" % i for i in range(300)]
+        self.assertEqual(_clean_hotwords([""] * 10 + many), many[:200], "上限仍是 200 条有效词")
+
+    def test_clean_dedups_after_fold(self):
+        self.assertEqual(_clean_hotwords(["Bug", "BUG", "bug", "如意"], fold=str.upper), ["BUG", "如意"])
+        self.assertEqual(_clean_hotwords(["Bug", "BUG", "bug"]), ["Bug", "BUG", "bug"], "不折叠的模型大小写是不同的词")
 
 
 class SherpaBackendTest(unittest.TestCase):
@@ -112,6 +132,14 @@ class SherpaBackendTest(unittest.TestCase):
         self.assertEqual(b.recognizer.streams[-1], "如意\nPULL REQUEST\nDEBUG")
         b.create_stream("")
         self.assertIsNone(b.recognizer.streams[-1])   # 没热词 = 不带参数的 create_stream
+
+    def test_session_hotwords_deduped_after_uppercasing(self):
+        """修前：去重在大小写折叠之前，全大写词表下 Bug/BUG/bug 变成三行 BUG。"""
+        fake, _calls = _fake_sherpa()
+        sys.modules["sherpa_onnx"] = fake
+        b = SherpaBackend(_model_dir(BILINGUAL, vocab=True))
+        SessionManager(b).open(["Bug", "BUG", "bug", "如意"])
+        self.assertEqual(b.recognizer.streams[-1], "BUG\n如意")
 
     def test_greedy_does_not_pass_unit_and_ignores_hotwords(self):
         fake, calls = _fake_sherpa()

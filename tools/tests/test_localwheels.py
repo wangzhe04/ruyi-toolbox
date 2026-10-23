@@ -229,6 +229,74 @@ class ProgressTest(unittest.TestCase):
             self.assertEqual(outside, ["../../Scripts/foo.exe"])
 
 
+class MissingFilesTest(unittest.TestCase):
+    """RECORD 里列了、磁盘上却没有的文件：照旧不进轮子（gather_entries 跳过它们），但要告警、OK 行带缺失数。
+    修前被静默丢掉 —— importlib.metadata 的 dist.files 本身就会滤掉不存在的文件，所以照样打印 OK、产出残缺轮子。"""
+
+    def _installed_with_hole(self, tmp):
+        site = Path(tmp) / "Lib" / "site-packages"
+        site.mkdir(parents=True)
+        di = _make_installed(site)
+        (site / "foo" / "data.bin").unlink()                    # 包里的数据文件没了
+        (site / "foo" / "__pycache__" / "__init__.cpython-312.pyc").unlink()   # pyc 本来就不带，不算
+        (site.parent.parent / "Scripts" / "foo.exe").unlink()   # Scripts 下的入口脚本由安装器重新生成，不算
+        return _rec_for(di)
+
+    def test_missing_files_reads_record_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self._installed_with_hole(tmp)
+            self.assertEqual(lw.missing_files(rec), ["foo/data.bin"])
+            names = {rel for rel, _ in lw.gather_entries(rec)[0]}
+            self.assertNotIn("foo/data.bin", names)   # 「跳过」的设计不变
+
+    def test_export_warns_and_counts_missing(self):
+        import argparse
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = self._installed_with_hole(tmp)
+            out = Path(tmp) / "out"
+            buf = io.StringIO()
+            saved = lw.inspect_dists
+            lw.inspect_dists = lambda: [rec]
+            try:
+                with contextlib.redirect_stdout(buf):
+                    code = lw.cmd_export(argparse.Namespace(out=str(out), exclude="", level=1))
+            finally:
+                lw.inspect_dists = saved
+            self.assertEqual(code, 0, "缺文件只告警、不算 FAIL（保留「跳过」的设计）")
+            lines = [ln for ln in buf.getvalue().splitlines() if not ln.startswith("PROG ")]
+            warn = [ln for ln in lines if ln.startswith("WARN")]
+            ok = [ln for ln in lines if ln.startswith("OK")]
+            self.assertEqual(len(warn), 1, lines)
+            self.assertIn("foo 1.0", warn[0])
+            self.assertIn("foo/data.bin", warn[0])
+            self.assertEqual(len(ok), 1, lines)
+            self.assertIn("缺 1 个文件", ok[0])
+
+    def test_complete_package_has_no_warning(self):
+        import argparse
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp) / "Lib" / "site-packages"
+            site.mkdir(parents=True)
+            rec = _rec_for(_make_installed(site))
+            self.assertEqual(lw.missing_files(rec), [])
+            buf = io.StringIO()
+            saved = lw.inspect_dists
+            lw.inspect_dists = lambda: [rec]
+            try:
+                with contextlib.redirect_stdout(buf):
+                    lw.cmd_export(argparse.Namespace(out=str(Path(tmp) / "out"), exclude="", level=1))
+            finally:
+                lw.inspect_dists = saved
+            self.assertFalse([ln for ln in buf.getvalue().splitlines() if ln.startswith("WARN")])
+            self.assertNotIn("缺", buf.getvalue())
+
+
 class WheelTagTest(unittest.TestCase):
     def _distinfo(self, tmp, *tags):
         di = Path(tmp) / "x-1.0.dist-info"

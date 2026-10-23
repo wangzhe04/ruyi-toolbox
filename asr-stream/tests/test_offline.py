@@ -20,8 +20,8 @@ from ruyi_asr_stream.engine import OfflineTranscriber, SessionManager, normalize
 from ruyi_asr_stream.registry import DIR_ENV, build_record, register, registration_path, self_check
 from ruyi_asr_stream.server import Settings, pick_free_port
 
-from .helpers import Client, FakeBackend, speech, start_server
-from .helpers_offline import FakeOffline, multipart_body, start_server_with_offline, wav_bytes
+from .helpers import Client, FakeBackend, fake_python, speech, start_server
+from .helpers_offline import FakeOffline, multipart_body, start_server_with_offline, wav_bytes, wav_with_rate
 
 
 class DecodingDefaultTest(unittest.TestCase):
@@ -49,6 +49,28 @@ class WavDecodeTest(unittest.TestCase):
         stereo = np.repeat(np.frombuffer(speech(1.0), "<i2"), 2).astype("<i2").tobytes()
         self.assertEqual(len(decode_wav_to_mono16k(wav_bytes(stereo, channels=2)).samples), 16000)
         self.assertEqual(len(decode_wav_to_mono16k(wav_bytes(speech(1.0)[:16000], sr=8000)).samples), 16000)
+
+    def test_sample_rate_whitelist(self):
+        """修前：头里采样率 = 1 Hz 时线性重采样放大 16000 倍（2 万字节吃掉 3 GB 内存）；= 0 时除零。"""
+        for sr in (0, 1, 7999, 192001, 1000000):
+            with self.assertRaises(UnsupportedAudioError, msg="sr=%d" % sr):
+                decode_wav_to_mono16k(wav_with_rate(speech(0.01), sr))
+        self.assertEqual(decode_wav_to_mono16k(wav_with_rate(speech(0.1), 8000)).sample_rate, 16000)
+        self.assertEqual(decode_wav_to_mono16k(wav_with_rate(speech(0.1), 192000)).sample_rate, 16000)
+
+    def test_resample_output_is_capped(self):
+        from ruyi_asr_stream import audio
+
+        saved = audio.MAX_AUDIO_SEC
+        audio.MAX_AUDIO_SEC = 2
+        try:
+            with self.assertRaises(UnsupportedAudioError):
+                audio.resample_linear(np.zeros(8000 * 3, dtype=np.float32), 8000, 16000)
+            with self.assertRaises(UnsupportedAudioError):
+                decode_wav_to_mono16k(wav_with_rate(speech(3.0)[: 8000 * 2 * 3], 8000))   # 8 kHz 下 3 秒
+            self.assertEqual(len(audio.resample_linear(np.zeros(8000, dtype=np.float32), 8000, 16000)), 16000)
+        finally:
+            audio.MAX_AUDIO_SEC = saved
 
     def test_non_wav_rejected(self):
         with self.assertRaises(UnsupportedAudioError):
@@ -117,6 +139,24 @@ class OfflineRouteTest(unittest.TestCase):
         st, j, _ = self.c.request("POST", "/v1/audio/transcriptions", b"x", {"Content-Type": ctype, "Origin": "http://evil"})
         self.assertEqual(st, 403)
 
+    def test_broken_wav_is_4xx_json_not_dropped_connection(self):
+        """修前：截断的 WAV（np.frombuffer 抛 ValueError）、采样率为 0（ZeroDivisionError）都没接住，客户端只看到连接被断。"""
+        truncated = wav_bytes(speech(0.5))[:-1]           # 数据段少一个字节 → PCM16 字节数成了奇数
+        for data in (truncated, wav_with_rate(speech(0.5), 0)):
+            body, ctype = multipart_body(data)
+            st, j, _ = self.c.request("POST", "/v1/audio/transcriptions", body, {"Content-Type": ctype})
+            self.assertIn(st, (400, 415))
+            self.assertIn(j["error"]["type"], ("bad_request", "unsupported_media_type"))
+            self.assertTrue(j["error"]["message"])
+        st, _, _ = self.c.request("GET", "/health")
+        self.assertEqual(st, 200, "坏音频不该带垮服务")
+
+    def test_bad_sample_rate_is_415(self):
+        for sr in (0, 1):
+            body, ctype = multipart_body(wav_with_rate(speech(0.01), sr))
+            st, j, _ = self.c.request("POST", "/v1/audio/transcriptions", body, {"Content-Type": ctype})
+            self.assertEqual((st, j["error"]["type"]), (415, "unsupported_media_type"), "sr=%d" % sr)
+
     def test_stream_route_still_works_alongside(self):
         st, j, _ = self.c.open()
         self.assertEqual(st, 200)
@@ -169,6 +209,7 @@ class OfflineRegistryTest(unittest.TestCase):
         os.makedirs(self.off_dir)
         for n in ("tokens.txt", "model.onnx", "model.int8.onnx"):
             Path(self.off_dir, n).write_bytes(b"x")
+        self.py = fake_python(os.path.join(self.tmp, "venv"))   # 自检会真 import 依赖；测试 venv 没 sherpa_onnx
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -194,18 +235,21 @@ class OfflineRegistryTest(unittest.TestCase):
         self.assertNotIn("RUYI_ASR_STREAM_OFFLINE_MODEL_DIR", rec2["run"]["env"])
 
     def test_self_check_validates_offline_dir_when_given(self):
-        self.assertTrue(self_check(sys.executable, self.pkg_root, self.stream_dir).ok)
-        self.assertTrue(self_check(sys.executable, self.pkg_root, self.stream_dir, self.off_dir).ok)
+        self.assertTrue(self_check(self.py, self.pkg_root, self.stream_dir).ok)
+        self.assertTrue(self_check(self.py, self.pkg_root, self.stream_dir, self.off_dir).ok)
         self.assertFalse(self_check(sys.executable, self.pkg_root, self.stream_dir, os.path.join(self.tmp, "nope")).ok)
         self.assertFalse(self_check(sys.executable, self.pkg_root, self.stream_dir, "relative/sv").ok)
+        Path(self.off_dir, "model.int8.onnx").write_bytes(b"")   # 优先挑中的 int8 是 0 字节 = 没下全
+        self.assertFalse(self_check(self.py, self.pkg_root, self.stream_dir, self.off_dir).ok)
 
     def test_register_with_offline(self):
         out = io.StringIO()
-        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=self.off_dir, env=self.env, out=out), 0)
+        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=self.off_dir, python_exe=self.py, env=self.env, out=out), 0)
         rec = json.loads(registration_path(self.env).read_text("utf-8"))
         self.assertEqual([p["type"] for p in rec["provides"]], ["asr-stream", "asr"])
         self.assertEqual(rec["run"]["env"]["RUYI_ASR_STREAM_OFFLINE_MODEL_DIR"], self.off_dir)
-        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=os.path.join(self.tmp, "nope"), env=self.env, out=io.StringIO()), 1)
+        self.assertEqual(register(model_dir=self.stream_dir, offline_model_dir=os.path.join(self.tmp, "nope"), python_exe=self.py,
+                                  env=self.env, out=io.StringIO()), 1)
 
 
 if __name__ == "__main__":
